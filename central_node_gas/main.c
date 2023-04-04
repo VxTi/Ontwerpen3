@@ -24,7 +24,7 @@
 
 // Speed of which the timer interrupt operates
 #define TICK_SPEED 2
-#define TWO_P_10 1024
+#define TIMER_PRESCALER 1024
 
 // The maximum size of the char buffers
 #define BUFFER_LENGTH 32
@@ -34,10 +34,9 @@
 #define ADC_MIN 200
 #define ADC_REF_V 1.6f
 
-#define PIN_CH4 PIN0_bm
-#define PIN_CO2 PIN0_bm
-#define TX_SDS011 PIN0_bm
-#define RX_SDS011 PIN1_bm
+#define PIN_CO2 PIN2_bm
+#define TX_SDS011 PIN1_bm
+#define RX_SDS011 PIN0_bm
 
 // Macros for useful math functions. absf returns the floating point absolute value.
 #define absf(x)         ((x) < 0   ? -(x) : (x))
@@ -51,11 +50,12 @@ const char * addresses[] = {"1_dev", "2_dev", "3_dev",
                             "4_dev", "5_dev", "6_dev"};
 
 // Buffers for receiving and sending packets.
-volatile uint8_t receive_buffer [BUFFER_LENGTH];
+volatile uint8_t rx_buffer [BUFFER_LENGTH];
 volatile uint8_t transmit_buffer[BUFFER_LENGTH];
 volatile bool    timer_triggered = false;
 volatile bool    packet_received = false;
-volatile int16_t received_byte = -1;
+volatile bool    received_sds011 = false;
+volatile uint8_t  sds011_rx_data;
 
 // NRF Configuration. Can change later on.
 typedef enum {
@@ -65,45 +65,46 @@ typedef enum {
 } nrf_cfg;
 
 // Predefine the functions for later use.
-void Configure();
-void NRFInit();
+void confugure();
+void configure_nrf();
 void NRFLoadPipes();
-void NRFSendPacket(char* buffer, uint16_t bufferSize);
-void ReadADC(ADC_t* adc, uint16_t * dst);
+void transmit_nrf(char* buffer, uint16_t bufferSize);
+void read_adc(ADC_t* adc, uint16_t * dst);
+void InitUSART_SDS011();
 
 // The main function, clearly
 int main(void) {
 
-    Configure();
+    confugure();
     USARTInit(F_CPU, UARTF0_BAUD);
-    NRFInit();
+    InitUSART_SDS011();
+    configure_nrf();
 
-    uint16_t ch4_res = 0, co2_res = 0;
-
-    bool phase = true;
+    uint16_t co2_res;
+    printf("Starting..\n");
 
     while (true) {
 
-        if (received_byte > -1) {
-            printf("%c", received_byte);
-            received_byte = -1;
+        if (packet_received) {
+
+            printf("R: %s\n", rx_buffer);
+            packet_received = false;
+        }
+    }
+
+    while (true) {
+        if (received_sds011) {
+            if (sds011_rx_data > 0)
+                printf("R: 0x%02X\n", sds011_rx_data);
+            received_sds011 = false;
         }
 
-
         if (timer_triggered) {
+            read_adc(&ADCA,&co2_res);
+            sprintf((char *) transmit_buffer, "co2_res=%d", co2_res);
 
-            ReadADC(
-                    phase ? &ADCA : &ADCB,
-                    phase ? &ch4_res : &co2_res);
-            sprintf((char *) transmit_buffer, "%s_ppm=%d",
-                    phase ? "ch4" : "co2",
-                    phase ? ch4_res : co2_res);
-
-            printf("%s\n", transmit_buffer);
-
-            NRFSendPacket((char *) transmit_buffer, strlen((char *) transmit_buffer));
+            transmit_nrf((char *) transmit_buffer, strlen((char *) transmit_buffer));
             memset((char *) transmit_buffer, 0, BUFFER_LENGTH);
-            phase = !phase;
             timer_triggered = false;
         }
     }
@@ -114,7 +115,7 @@ int main(void) {
  * > 32MHz Clock speed
  * > E1 Timer
  */
-void Configure() {
+void confugure() {
     OSC.XOSCCTRL = OSC_FRQRANGE_12TO16_gc |                   // Select frequency range
                    OSC_XOSCSEL_XTAL_16KCLK_gc;                // Select start-up time
     OSC.CTRL |= OSC_XOSCEN_bm;                                // Enable oscillator
@@ -131,46 +132,40 @@ void Configure() {
 
     PMIC.CTRL |= PMIC_LOLVLEN_bm;                             // Enable interrupts
 
-    PORTA.DIRCLR = PIN_CH4;
-    PORTB.DIRCLR = PIN_CO2;
+    PORTA.DIRCLR = PIN_CO2;
     ADCA.CH0.MUXCTRL = ADC_CH_MUXPOS_PIN0_gc;               // Multiplex selection for pin 2
-    ADCB.CH0.MUXCTRL = ADC_CH_MUXPOS_PIN0_gc;
     ADCA.CH0.CTRL    = ADC_CH_INPUTMODE_SINGLEENDED_gc;     // Single ended input without gain
-    ADCB.CH0.CTRL    = ADC_CH_INPUTMODE_SINGLEENDED_gc;
     ADCA.REFCTRL     = ADC_REFSEL_INTVCC_gc;                // Reference voltage, INTVCC = 3.3V / 1.6 ~ 2.0V
-    ADCB.REFCTRL     = ADC_REFSEL_INTVCC_gc;
     ADCA.CTRLB       = ADC_RESOLUTION_12BIT_gc;             // Range of number conversion, 185 - 2^14-1
-    ADCB.CTRLB       = ADC_RESOLUTION_12BIT_gc;
-    ADCA.PRESCALER   = ADC_PRESCALER_DIV512_gc;             // F_CPU / PRESCALER -> Speed of conversoin
-    ADCB.PRESCALER   = ADC_PRESCALER_DIV512_gc;
+    ADCA.PRESCALER   = ADC_PRESCALER_DIV512_gc;             // F_CPU / TIMER_PRESCALER -> Speed of conversoin
     ADCA.CTRLA       = ADC_ENABLE_bm;                       // Turn on the ADC converter
-    ADCB.CTRLB       = ADC_ENABLE_bm;
 
     TCE1.CTRLB    = TC_WGMODE_NORMAL_gc;
     TCE1.CTRLA    = TC_CLKSEL_DIV1024_gc;                   // Clock divisor. For 32MHz and D(1024), it does 31250 loops per second
-    TCE1.PER      = F_CPU / (TWO_P_10 * TICK_SPEED) - 1;    // Setup the speed of the TIMER
+    TCE1.PER      = F_CPU / (TIMER_PRESCALER * TICK_SPEED) - 1;    // Setup the speed of the TIMER
     TCE1.INTCTRLA = TC_OVFINTLVL_LO_gc;
 
     sei();
 }
 
 ISR(USARTE0_RXC_vect) {
-    received_byte = USARTE0.DATA;
+    sds011_rx_data = USARTE0.DATA;
+    received_sds011 = true;
 }
 
 void InitUSART_SDS011() {
     PORTE.DIRCLR = RX_SDS011;
     PORTE.DIRSET = TX_SDS011;
     PORTE.OUTSET = TX_SDS011;
-    uint16_t bsel = 3317;
+    //PORTE.PIN0CTRL = PORT_OPC_PULLUP_gc;
     int8_t bscale = -4;
+    uint16_t bsel = 3317;
     USARTE0.BAUDCTRLA = (bsel & USART_BSEL_gm);
     USARTE0.BAUDCTRLB = ((bscale << USART_BSCALE_gp) & USART_BSCALE_gm) |
                         ((bsel >> 8) & ~USART_BSCALE_gm);
-    USARTE0.CTRLB = USART_RXEN_bm | USART_TXEN_bm;
+    USARTE0.CTRLB = USART_RXEN_bm;
 
-    USARTE0.CTRLA = USART_RXCINTLVL_MED_gc |
-                    USART_TXCINTLVL_OFF_gc | USART_DREINTLVL_OFF_gc;
+    USARTE0.CTRLA = USART_RXCINTLVL_MED_gc;
 
     PMIC.CTRL |= PMIC_MEDLVLEN_bm | PMIC_LOLVLEN_bm;
 }
@@ -178,7 +173,7 @@ void InitUSART_SDS011() {
 /**
  *  This method sets up the configuration for our NRF device.
  */
-void NRFInit(void) {
+void configure_nrf(void) {
     // Set up the transmission
     nrfspiInit();
     nrfBegin();
@@ -225,7 +220,7 @@ void NRFInit(void) {
  * @param adc The adc object to use
  * @param dst The target variable to store the retrieved data in.
  */
-void ReadADC(ADC_t* adc, uint16_t * dst) {
+void read_adc(ADC_t* adc, uint16_t * dst) {
     adc->CH0.CTRL |= ADC_CH_START_bm;                    // start ADC conversion
     while ( !(adc->CH0.INTFLAGS & ADC_CH_CHIF_bm) ) ;    // wait until it's ready
     *dst = adc->CH0.RES;
@@ -250,7 +245,7 @@ void NRFLoadPipes() {
  * @param buffer The buffer to be sent
  * @param bufferSize The size of the buffer
  */
-void NRFSendPacket(char* buffer, uint16_t bufferSize) {
+void transmit_nrf(char* buffer, uint16_t bufferSize) {
 
     cli();                                                  // Disable interrupts
     nrfStopListening();                                     // Stop listening
@@ -281,8 +276,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         len = nrfGetDynamicPayloadSize();
-        nrfRead((char *) receive_buffer, len );
-        receive_buffer[len] = '\0';
+        nrfRead((char *) rx_buffer, len );
+        rx_buffer[len] = '\0';
         packet_received = true;
     }
 }

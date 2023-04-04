@@ -16,15 +16,9 @@
 #include "serialF0.h"
 #include <stdbool.h>
 
-#define ADC_MIN (200)
-#define ADC_MAX (4095)
-
-#define MV_TO_V   (0.001F)
-#define V_IN      (3.3F)
-#define ADC_REF_V (1.6F)
-
 // The humidity is logarithmically linear. This value is calculated from the data from the datasheet
 // The resistance has to be high to create an accurate voltage divider.
+
 // The HUMID_GROWTH_FACTOR is calculated by
 #define HUMID_RESISTANCE           (5600000UL)    // Resistor value
 #define HUMID_R_TEMP_GROWTH_FACTOR (0.92302818069F)  // Average growth factor of temperature.
@@ -33,114 +27,120 @@
 
 #define TICK_SPEED 1 // Frequency at which the timer interrupt is called.
 
-#define BUFFER_SIZE 32 // Max char buffer size
+#define ADC_REF_V (1.6F)
+#define ADC_MIN   (200)
+#define ADC_MAX   (4095)
 
-#define CENTRAL_DEVICE_IDX 0
 
-#define LED_PER 999
+#define SENSOR_COUNT (3)
+#define TIMER_PRESCALER (1024)
+
+#define BUFFER_SIZE (32) // Max char buffer size
+
+#define CENTRAL_DEVICE_IDX (0)
 
 #define ADC_TO_MVOLT(res, ref) ((3200 / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN))
-#define MVOLT_TO_C(v)          ((8.194f - sqrtf(67.141636f + 4 * 0.00262f * (1324.0f - (v)))) / (2 * -0.00262f) + 30.0f)
-#define HEAT_INDEX(T, RH) (-8.7847 + 1.6114*T + 2.3385*RH - 0.1461*T*RH - 0.01231*T*T - 0.0162*RH*RH + 0.0022*T*T*RH + 0.0007*T*RH*RH - .00000352*T*T*RH*RH)
 
+inline void calculate_temperature(uint16_t temperatureRes, int16_t * varDst) {
+    *varDst = (int16_t) ((8.194f - sqrtf(67.141636f + 4 * 0.00262f * (1324.0f - ADC_TO_MVOLT(temperatureRes, ADC_REF_V)))) / (2 * -0.00262f) + 30.0f);
+}
+inline void calculate_humidity(uint16_t adcRes, uint16_t temperature, uint8_t * varDst) {
+    float R_humid = HUMID_RESISTANCE * ((float)(ADC_MAX - ADC_MIN) / (float)(adcRes - ADC_MIN) - 1);
+    *varDst = (uint8_t) (HUMID_OFFSET_VALUE +
+                        log10f(R_humid * powf(HUMID_R_TEMP_GROWTH_FACTOR, temperature)) * HUMID_GROWTH_FACTOR);
+}
 
 const char *addresses[] = {"1_dev", "2_dev", "3_dev",
                            "4_dev", "5_dev", "6_dev"};
 
-volatile uint8_t receive_buffer[BUFFER_SIZE];
+volatile uint8_t rx_buffer[BUFFER_SIZE];
 volatile bool packet_received = false;
 volatile bool timer_triggered = false;
 
-// Configuration. Can change later on.
-typedef enum NRF_CONFIG {
-    NRF_CHANNEL    = 6,                         // Frequency channel (2400 + CH)MHz
-    NRF_DATA_SPEED = NRF_RF_SETUP_RF_DR_250K_gc,// Data transfer speed
-    NRF_CRC        = NRF_CONFIG_CRC_8_gc,       // Cyclic redundancy check length
-} nrf_cfg;
+/**
+ * Config struct for NRF settings, which is loaded in the main function
+ * using a 'initialize_nrf(struct)' call
+ */
+typedef struct {
+    NRF_SETUP_AW_ARD_t NRF_RETRY_DELAY;
+    NRF_SETUP_AW_ARC_t NRF_RETRY_ATTEMPTS;
+    nrf_rf_setup_pwr_t NRF_POWER_LEVEL;
+    nrf_rf_setup_rf_dr_t NRF_DATA_SPEED;
+    nrf_config_crc_t NRF_CRC_LENGTH;
+    uint8_t NRF_CHANNEL;
+    uint8_t NRF_AUTO_ACK;
+} nrf_settings;
 
-void Configure();
-void NRFInit();
-void NRFLoadPipes();
-void NRFSendPacket(uint8_t* buffer, uint16_t bufferSize);
-void ReadADC(ADC_t * adc, uint16_t * dst);
+// Struct containing the current NRF settings.
+const nrf_settings nrfSettings = {
+        .NRF_AUTO_ACK       = true,
+        .NRF_POWER_LEVEL    = NRF_RF_SETUP_PWR_6DBM_gc,
+        .NRF_RETRY_DELAY    = NRF_SETUP_ARD_1000US_gc,
+        .NRF_RETRY_ATTEMPTS = NRF_SETUP_ARC_8RETRANSMIT_gc,
+        .NRF_DATA_SPEED     = NRF_RF_SETUP_RF_DR_250K_gc,
+        .NRF_CRC_LENGTH     = NRF_CONFIG_CRC_8_gc,
+        .NRF_CHANNEL        = 6
+};
+
+void load_pipes_nrf();
+void configure_nrf (nrf_settings settings);
+void transmit_nrf  (char * buffer, uint16_t bufferSize);
+void str_to_int    (const char * input, uint16_t * dst);
+void read_adc      (ADC_t * adc, uint16_t * dst);
+void configure     ();
 
 // here we go again
 int main(void) {
 
-    Configure();
+    configure();
     USARTInit(F_CPU, UARTF0_BAUD);
-    NRFInit();
+    configure_nrf(nrfSettings);
 
-    PORTD.DIRSET = PIN5_bm;
-    TCD1.CTRLA = TC_CLKSEL_DIV64_gc;
-    TCD1.CTRLB = TC0_CCBEN_bm | TC_WGMODE_SINGLESLOPE_gc;
-    TCD1.PER   = LED_PER - 1;
-    TCD1.CCB   = LED_PER / 2;
-
-    bool phase = false;
     char transmit_buffer[BUFFER_SIZE];
 
-    uint16_t temperature_res, humidity_res;
-    int8_t temperature, humidity;
-    float mV_temperature, V_humidity, R_humid;
+    uint16_t temperature_res, humidity_res, co2_res = 0;
+    int16_t temperature;
+    uint8_t humidity;
 
-    printf("\e[H\e[2J\e[3J");
-
+    uint8_t phase = 0;
 
     while (true) {
+        TIMER:
         if (timer_triggered) {
-            phase = !phase;
 
-            // H = 165.71594 + log10(((R_humidity) * 0.923778408^T) / -0.04356696835
+            phase = (phase + 1) % SENSOR_COUNT;
 
-            ReadADC(&ADCA, &temperature_res);                       // Read ADC value from temperature sensor
-            ReadADC(&ADCB, &humidity_res);                          // Read ADC value from humidity sensor
-            mV_temperature = ADC_TO_MVOLT(temperature_res, ADC_REF_V);       // Convert ADC to mV
-            V_humidity     = ADC_TO_MVOLT(humidity_res, 1.0f) * MV_TO_V;    // Convert ADC to mV and then to V
-            temperature    = (int8_t) MVOLT_TO_C  (mV_temperature);
+            read_adc(&ADCA, &temperature_res);                       // Read ADC value from temperature sensor
+            read_adc(&ADCB, &humidity_res);                          // Read ADC value from humidity sensor
+            calculate_temperature(temperature_res, &temperature);
+            calculate_humidity(humidity_res, temperature, &humidity);
 
-            R_humid = HUMID_RESISTANCE * (V_IN / V_humidity - 1);          // Calculate the resistance going through the DHT20
-            humidity = (int8_t) (HUMID_OFFSET_VALUE +
-                                  log10f(R_humid * powf(HUMID_R_TEMP_GROWTH_FACTOR, temperature)) * HUMID_GROWTH_FACTOR);
+            if (phase > 1 && co2_res == 0)
+                goto TIMER;
 
-            if (phase)
-                sprintf(transmit_buffer, "temp=%d", temperature);
-            else
-                sprintf(transmit_buffer, "humid=%d", humidity);
-
-            NRFSendPacket((uint8_t *) transmit_buffer, strlen(transmit_buffer));
-
-            printf("U: %.1fV R: %.0fΩ T: %dC H: %d%s Hi: %.1f [%s]      \r",
-                   V_humidity,
-                   (R_humid), temperature, humidity, "%",
-                   HEAT_INDEX(temperature, humidity),
-                   receive_buffer);
+            sprintf((char *) transmit_buffer, "%s=%d",
+                    phase == 0 ? "temp" : phase == 1 ? "humid" : "co2_res",
+                    phase == 0 ? temperature : phase == 1 ? humidity : co2_res);
+            transmit_nrf((char *) transmit_buffer, strlen((char *) transmit_buffer));
 
             timer_triggered = false;
         }
+
         if (packet_received) {
+            if (!strncmp((char *) rx_buffer, "co2_res=", 8))
+                str_to_int((char *) &rx_buffer[8], &co2_res);
+
+
             packet_received = false;
         }
     }
 }
 
 /**
- * Method of reading data from the analog to digital converter
- * @param adc The ADC to read from
- * @return The value retrieved by the adc
- */
-void ReadADC(ADC_t * adc, uint16_t * dst) {
-    adc->CH0.CTRL |= ADC_CH_START_bm;                    // start ADC conversion
-    while (!(adc->CH0.INTFLAGS & ADC_CH_CHIF_bm)) ;      // wait until it's ready
-    *dst = adc->CH0.RES;
-    adc->CH0.INTFLAGS |= ADC_CH_CHIF_bm;                 // reset interrupt flag
-}
-
-/**
  * This method sets all the chip configurations to what we'd like to use,
  * such as setting the clock speed to 32MHz, configuring the ADC, Timer E1, etc.
  */
-void Configure() {
+void configure() {
 
     // This code is taken from clock.h
     // Written by Wim Dolman
@@ -170,43 +170,82 @@ void Configure() {
     ADCB.REFCTRL     = ADC_REFSEL_INTVCC_gc;
     ADCA.CTRLB       = ADC_RESOLUTION_12BIT_gc;             // Range of number conversion, 185 - 2^14-1
     ADCB.CTRLB       = ADC_RESOLUTION_12BIT_gc;
-    ADCA.PRESCALER   = ADC_PRESCALER_DIV512_gc;             // F_CPU / PRESCALER -> Speed of conversoin
+    ADCA.PRESCALER   = ADC_PRESCALER_DIV512_gc;             // F_CPU / TIMER_PRESCALER -> Speed of conversoin
     ADCB.PRESCALER   = ADC_PRESCALER_DIV512_gc;
     ADCA.CTRLA       = ADC_ENABLE_bm;                       // Turn on the ADC converter
     ADCB.CTRLA       = ADC_ENABLE_bm;
 
     TCE0.CTRLB    = TC_WGMODE_NORMAL_gc;
     TCE0.CTRLA    = TC_CLKSEL_DIV1024_gc;                   // Clock divisor. For 32MHz and D(1024), it does 31250 loops per second
-    TCE0.PER      = F_CPU / (1024 * TICK_SPEED) - 1;        // Setup the speed of the TIMER
+    TCE0.PER      = F_CPU / (TIMER_PRESCALER * TICK_SPEED) - 1;        // Setup the speed of the TIMER
     TCE0.INTCTRLA = TC_OVFINTLVL_LO_gc;                     // No interrupts
 
+    PORTD.DIRSET = PIN5_bm;
+    TCD1.CTRLA = TC_CLKSEL_DIV64_gc;
+    TCD1.CTRLB = TC0_CCBEN_bm | TC_WGMODE_SINGLESLOPE_gc;
+    TCD1.PER   = LED_PER - 1;
+    TCD1.CCB   = LED_PER / 2;
+
     sei();
+}
+
+/**
+ * Method for converting a string to an integer number.
+ * @param input The input string to convert.
+ * @param dst The targeted variable to store the result in.
+ */
+void str_to_int(const char * input, uint16_t * dst) {
+    *dst = 0;
+    for (uint16_t i = 0; input[i] != '\0'; i++) {
+        if (!(input[i] >= '0' && input[i] <= '9'))
+            return;
+        *dst = *dst * 10 + input[i] - '0';
+    }
+}
+
+/**
+ * Method of reading data from the analog to digital converter
+ * @param adc The ADC to read from
+ * @return The value retrieved by the adc
+ */
+void read_adc(ADC_t * adc, uint16_t * dst) {
+    adc->CH0.CTRL |= ADC_CH_START_bm;                    // start ADC conversion
+    while (!(adc->CH0.INTFLAGS & ADC_CH_CHIF_bm)) ;      // wait until it's ready
+    *dst = adc->CH0.RES;
+    adc->CH0.INTFLAGS |= ADC_CH_CHIF_bm;                 // reset interrupt flag
 }
 
 /**
  *  This method sets up the configuration for our NRF device.
  *  Individual settings can be changed in the enumerable defined at the top of this file.
  */
-void NRFInit(void) {
+void configure_nrf(nrf_settings settings) {
     // Set up the transmission
     nrfspiInit();
     nrfBegin();
     // Retry after 1 MS and retransmit if failed
-    nrfSetRetries(NRF_SETUP_ARD_1000US_gc, NRF_SETUP_ARC_8RETRANSMIT_gc);
+    nrfSetRetries(settings.NRF_RETRY_DELAY, settings.NRF_RETRY_ATTEMPTS);
     // Set it to -6dBm for high power amplification
-    nrfSetPALevel(NRF_RF_SETUP_PWR_6DBM_gc);
+    nrfSetPALevel(settings.NRF_POWER_LEVEL);
 
     // Data transmission rate, set at 250Kb
-    nrfSetDataRate((nrf_rf_setup_rf_dr_t) NRF_DATA_SPEED);
+    nrfSetDataRate(settings.NRF_DATA_SPEED);
 
+    // Enable cyclic redundancy check. This checks whether the packet is corrupt or not.
+    // If not, parse it, else retry
+    nrfSetCRCLength(settings.NRF_CRC_LENGTH);
 
-    nrfSetCRCLength((nrf_config_crc_t) NRF_CRC);
-    nrfSetChannel(NRF_CHANNEL);
+    // Set the channel to what we've previously defined.
+    // The band frequency is defined as f = (2400 + CH) MHz
+    // For channel 6, this means 2,406 MHz
+    nrfSetChannel(settings.NRF_CHANNEL);
 
     // Require acknowledgements
-    nrfSetAutoAck(1);
+    nrfSetAutoAck(settings.NRF_AUTO_ACK);
     nrfEnableDynamicPayloads();
     nrfClearInterruptBits();
+
+    // Clear the Rx and Tx-buffers
     nrfFlushRx();
     nrfFlushTx();
 
@@ -217,7 +256,7 @@ void NRFInit(void) {
                       PORT_INT0LVL_LO_gc ; // Interrupts On
 
     // Opening pipes
-    NRFLoadPipes();
+    load_pipes_nrf();
     nrfStartListening();
     nrfPowerUp();
 }
@@ -227,7 +266,7 @@ void NRFInit(void) {
  * Since this is the central_node, it can communicate to every single device.
  * Other devices can only send data to this one.
  */
-void NRFLoadPipes() {
+void load_pipes_nrf() {
 
     // Open our pipe for writing.
     nrfOpenWritingPipe((uint8_t *) addresses[CENTRAL_DEVICE_IDX]);
@@ -238,26 +277,27 @@ void NRFLoadPipes() {
 }
 
 /**
+* Method of sending packets via the NRF chip.
+* @note The max size of the buffer can be 32 bytes
+* @param buffer The buffer to be sent
+* @param bufferSize The size of the buffer
+*/
+void transmit_nrf(char * buffer, uint16_t bufferSize) {
+    printf("%s\n", buffer);
+    cli();                                   // Disable interrupts
+    nrfStopListening();                      // Stop listening
+    nrfWrite(buffer, bufferSize);   // Write to the targetted device
+    nrfStartListening();                     // Start listening for input again
+    sei();                                   // re-enable interrupts
+}
+
+/**
  * The TIMER interrupt vector. This one is triggered TICK_SPEED times
  * The function puts the lux value in the transmit buffer, then triggers
  * the process state to send the buffer to the NRF chip in the main loop.
  */
 ISR(TCE0_OVF_vect) {
     timer_triggered = true;
-}
-
-/**
- * Method of sending packets via the NRF chip.
- * @note The max size of the buffer can be 32 bytes
- * @param buffer The buffer to be sent
- * @param bufferSize The size of the buffer
- */
-void NRFSendPacket(uint8_t* buffer, uint16_t bufferSize) {
-    cli();                                   // Disable interrupts
-    nrfStopListening();                      // Stop listening
-    nrfWrite(buffer, bufferSize);   // Write to the targetted device
-    nrfStartListening();                     // Start listening for input again
-    sei();                                   // re-enable interrupts
 }
 
 /**
@@ -273,8 +313,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         packet_length = nrfGetDynamicPayloadSize();
-        nrfRead( (uint8_t *) receive_buffer, packet_length );
-        receive_buffer[packet_length] = '\0';
+        nrfRead((uint8_t *) rx_buffer, packet_length );
+        rx_buffer[packet_length] = '\0';
         packet_received = true;
     }
 }

@@ -17,16 +17,16 @@
 #include <stdbool.h>
 
 // This is the index of the current device. The device address is hereby selected as addresses[DEVICE_IDX]
-#define DEVICE_IDX 3
+#define DEVICE_IDX 4
 
 // The index of the central device. This is always 0
 #define CENTRAL_DEVICE_IDX 0
 
 // Speed of which the timer interrupt operates
 #define TICK_SPEED 20
-#define TWO_P_10 1024
+#define TIMER_PRESCALER 1024
 #define DELTA_T (1.0F / TICK_SPEED)
-#define INTERPOLATION_FACTOR 0.5f
+#define INTERPOLATION_FACTOR (1.0f / 10.0f)
 
 // The maximum size of the char buffers
 #define BUFFER_LENGTH 32
@@ -36,16 +36,19 @@
 #define ADC_MIN 200
 #define ADC_REF_V 1.6f
 
+#define LED_PIN_MTNSENSOR PIN3_bm
 #define LED_PIN_RED    PIN0_bm
 #define LED_PIN_GREEN  PIN1_bm
 #define LED_PIN_BLUE   PIN2_bm
-#define LED_PER        8000
-#define MAX_BRIGHTNESS 0.5f
+#define LED_PER        100
+#define MAX_BRIGHTNESS (1.0f / 16.0f) // 0.00001 = 1 / (1 << 5)
+#define LAMP_SLEEP_TIME 5
 
 // Macros for useful math functions. absf returns the floating point absolute value.
-#define clampf(x, a, b) ((x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 
+#define clampf(x, a, b) ((x) < (a) ? (a) : (x) > (b) ? (b) : (x))
 // Macros for converting ADC res to temperature, according to the datasheet of the LMT85
+
 #define ADC_TO_MVOLT(res, ref) ((3200 / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN))
 
 // The addresses of all the nodes.
@@ -53,71 +56,62 @@ const char * addresses[] = {"1_dev", "2_dev", "3_dev",
                             "4_dev", "5_dev", "6_dev"};
 
 // Buffers for receiving and sending packets.
-volatile uint8_t receive_buffer[BUFFER_LENGTH];
+volatile uint8_t rx_buffer[BUFFER_LENGTH];
 volatile uint8_t transmit_buffer[BUFFER_LENGTH];
 volatile bool    timer_triggered = false;
 volatile bool    packet_received = false;
-volatile bool    second_passed   = false;
 
-// NRF Configuration. Can change later on.
-typedef enum {
-    NRF_CHANNEL    = 6,                         // Frequency channel (2400 + CH)MHz
-    NRF_DATA_SPEED = NRF_RF_SETUP_RF_DR_250K_gc,// Data transfer speed
-    NRF_CRC        = NRF_CONFIG_CRC_8_gc,       // Cyclic redundancy check length
-} nrf_cfg;
+volatile bool    second_passed   = false;
 
 // Vector struct. handy.
 typedef struct {
     float x, y, z, w;
-} vec3;
+} vec4;
 
-#define DEFAULT_TEMPERATUER_VALUE 20
-#define COLOR_COUNT 4
-#define COLOR_MIN_TEMPERATURE 15
-#define COLOR_MAX_TEMPERATURE 35
-#define LAMP_SLEEP_TIME 5
-
-const vec3 colors[] = {
-        {.x = 0, .y = 0, .z = 1, .w = 1},               // Blue
-        {.x = 1, .y = 1, .z = 0, .w = 1},               // Yellow
-        {.x = 1.0f, .y = 0.647058824f, .z = 0, .w = 1}, // Orange
-        {.x = 1, .y = 0, .z = 0, .w = 1}                // Red
-};
-
-inline void v_translate(vec3 * vector, float x, float y, float z, float w) {
+inline void v_translate(vec4 * vector, float x, float y, float z, float w) {
     vector->x = x;
     vector->y = y;
     vector->z = z;
     vector->w = w;
 }
 
+enum {
+    TEMPERATURE_MIN = 18,
+    TEMPERATURE_MAX = 30,
+    HUMIDITY_MIN = 60,
+    HUMIDITY_MAX = 100,
+    CO2_MAX_RES = 1600
+} THRESHOLDS;
+
 // Predefine the functions for later use.
-void Configure();
-void NRFInit();
-void NRFLoadPipes();
-void NRFSendPacket(char* buffer, uint16_t bufferSize);
-void LoadLights();
-void SetRGB(float r, float g, float b);
-void SetRGBA(float r, float g, float b, float a);
+void configure();
+void configure_nrf();
+void load_pipes_nrf();
+void transmit_nrf(char* buffer, uint16_t bufferSize);
+void configure_lights();
+void set_rgb(float r, float g, float b);
+void set_rgba(float r, float g, float b, float a);
 
 // The main function, clearly
 int main(void) {
 
-    Configure();
+    configure();
     USARTInit(F_CPU, UARTF0_BAUD);
-    NRFInit();
-    LoadLights();
+    configure_nrf();
+    configure_lights();
 
-    vec3 color, color_lerp;
+    vec4 color, color_lerp;
     v_translate(&color, 0, 0, 0, 0);
-    v_translate(&color_lerp, 0, 0, 0, 0);
+    v_translate(&color_lerp, 1, 1, 1, 0);
 
-    uint8_t color_index = 0;
-    int8_t inside_temperature = DEFAULT_TEMPERATUER_VALUE;
     uint16_t seconds_passed = 0;
     bool lamp_enabled = false;
-    PORTD.DIRCLR = PIN3_bm;
 
+    uint8_t humidity = 0;
+    int8_t temperature = 0;
+    uint16_t co2_res = 0;
+
+    uint8_t danger_level = 0;
 
     while (true) {
 
@@ -140,6 +134,10 @@ int main(void) {
         if (timer_triggered) {
             color_lerp.w = lamp_enabled ? MAX_BRIGHTNESS : 0.0f;
 
+            color_lerp.x = clampf((float)(temperature - TEMPERATURE_MIN) / (TEMPERATURE_MAX - TEMPERATURE_MIN), 0.1f, 1); // RED
+            color_lerp.y = clampf((float)(CO2_MAX_RES) / (float)(co2_res - CO2_MAX_RES), 0, 1);
+            color_lerp.z = clampf((float)(humidity - HUMIDITY_MIN) / (HUMIDITY_MAX - HUMIDITY_MIN), 0.1f, 1);
+
             // Linear interpolation
             v_translate(&color,
                         color.x + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.x - color.x),
@@ -147,20 +145,25 @@ int main(void) {
                         color.z + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.z - color.z),
                         color.w + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.w - color.w));
 
-            SetRGBA(color.x, color.y, color.z, color.w);
-            color_index = (uint8_t) roundf(clampf(-0.5f + (float) (COLOR_COUNT - 1) / (COLOR_MAX_TEMPERATURE - COLOR_MIN_TEMPERATURE) * (float)(inside_temperature - COLOR_MIN_TEMPERATURE), 0, COLOR_COUNT - 1));
+            set_rgba(color.x, color.y, color.z, color.w);
+
             timer_triggered = false;
         }
 
-        v_translate(&color_lerp, colors[color_index].x, colors[color_index].y, colors[color_index].z, colors[color_index].w);
-
         if (packet_received) {
 
-            if (!strncmp((char*)receive_buffer, "temp=", 5))
-                inside_temperature = atoi((char *) (&receive_buffer[5]));
+            printf("%s\n", rx_buffer);
+
+            if (!strncmp((char *) rx_buffer, "co2_res=", 8)) {
+                co2_res = atoi((char *) &rx_buffer[8]);
+            } else if (!strncmp((char *) rx_buffer, "temp=", 5)) {
+                temperature = atoi((char *) &rx_buffer[5]);
+            } else if (!strncmp((char *) rx_buffer, "humid=", 6)) {
+                humidity = atoi((char *) &rx_buffer[6]);
+            }
 
             // Clear the receive-buffer.
-            memset((char *) receive_buffer, 0, BUFFER_LENGTH);
+            memset((char *) rx_buffer, 0, BUFFER_LENGTH);
             packet_received = false;
         }
     }
@@ -171,7 +174,7 @@ int main(void) {
  * > 32MHz Clock speed
  * > E1 Timer
  */
-void Configure() {
+void configure() {
     OSC.XOSCCTRL = OSC_FRQRANGE_12TO16_gc |                   // Select frequency range
                    OSC_XOSCSEL_XTAL_16KCLK_gc;                // Select start-up time
     OSC.CTRL |= OSC_XOSCEN_bm;                                // Enable oscillator
@@ -190,12 +193,12 @@ void Configure() {
 
     TCE1.CTRLB    = TC_WGMODE_NORMAL_gc;
     TCE1.CTRLA    = TC_CLKSEL_DIV1024_gc;            // Clock divisor. For 32MHz and D(1024), it does 31250 loops per second
-    TCE1.PER      = F_CPU / (TWO_P_10 * TICK_SPEED) - 1;         // Setup the speed of the TIMER
+    TCE1.PER      = F_CPU / (TIMER_PRESCALER * TICK_SPEED) - 1;         // Setup the speed of the TIMER
     TCE1.INTCTRLA = TC_OVFINTLVL_LO_gc;             // No interrupts
 
     TCE0.CTRLB = TC_WGMODE_NORMAL_gc;
     TCE0.CTRLA = TC_CLKSEL_DIV1024_gc;
-    TCE0.PER   = F_CPU / (TWO_P_10) - 1;
+    TCE0.PER   = F_CPU / (TIMER_PRESCALER) - 1;
     TCE0.INTCTRLA = TC_OVFINTLVL_LO_gc;
 
     sei();
@@ -206,7 +209,7 @@ void Configure() {
  * This changes the frequency of which the PWM operates at,
  * which in turn changes the brightness.
  */
-void SetRGB(float r, float g, float b) {
+void set_rgb(float r, float g, float b) {
     // Prevention.
     // If this isn't done you might risk frying your retina O_O
     r = clampf(r, 0, MAX_BRIGHTNESS);
@@ -222,28 +225,28 @@ void SetRGB(float r, float g, float b) {
  * Same method as above, only with an alpha component
  * This is basically the same as changing the brightness.
  */
-void SetRGBA(float r, float g, float b, float a) {
-    a = clampf(a, 0, MAX_BRIGHTNESS);
-    SetRGB(r * a, g * a, b * a);
+void set_rgba(float r, float g, float b, float a) {
+    set_rgb(r * a, g * a, b * a);
 }
 
 /**
  * Method for setting up the RGB lights using PWM
  */
-void LoadLights() {
+void configure_lights() {
 
     PORTD.DIRSET = LED_PIN_RED | LED_PIN_GREEN | LED_PIN_BLUE;
+    PORTD.DIRCLR = LED_PIN_MTNSENSOR;
     TCD0.CTRLA = TC_CLKSEL_DIV64_gc;
     TCD0.CTRLB = TC0_CCAEN_bm | TC0_CCBEN_bm | TC0_CCCEN_bm | TC_WGMODE_SINGLESLOPE_gc;
     TCD0.PER   = LED_PER - 1;
-    SetRGB(0, 0, 0);
+    set_rgb(0, 0, 0);
 }
 
 /**
  *  This method sets up the configuration for our NRF device.
+ *  Individual settings can be changed in the enumerable defined at the top of this file.
  */
-void NRFInit(void) {
-    // Set up the transmission
+void configure_nrf() {
     nrfspiInit();
     nrfBegin();
     // Retry after 1 MS and retransmit if failed
@@ -252,16 +255,16 @@ void NRFInit(void) {
     nrfSetPALevel(NRF_RF_SETUP_PWR_6DBM_gc);
 
     // Data transmission rate, set at 250Kb
-    nrfSetDataRate((nrf_rf_setup_rf_dr_t) NRF_DATA_SPEED);
+    nrfSetDataRate(NRF_RF_SETUP_RF_DR_250K_gc);
 
     // Enable cyclic redundancy check. This checks whether the packet is corrupt or not.
     // If not, parse it, else retry
-    nrfSetCRCLength((nrf_config_crc_t) NRF_CRC);
+    nrfSetCRCLength (NRF_CONFIG_CRC_8_gc);
 
     // Set the channel to what we've previously defined.
     // The band frequency is defined as f = (2400 + CH) MHz
     // For channel 6, this means 2,406 MHz
-    nrfSetChannel(NRF_CHANNEL);
+    nrfSetChannel(6);
 
     // Require acknowledgements
     nrfSetAutoAck(1);
@@ -279,7 +282,7 @@ void NRFInit(void) {
                       PORT_INT0LVL_LO_gc ; // Interrupts On
 
     // Opening pipes
-    NRFLoadPipes();
+    load_pipes_nrf();
     nrfStartListening();
     nrfPowerUp();
 }
@@ -290,7 +293,7 @@ void NRFInit(void) {
  * We open the central pipe for reading only. This means that if other nodes want to communicate
  * with this window_node, we have to send the message to the central window_node first.
  */
-void NRFLoadPipes() {
+void load_pipes_nrf() {
 
     nrfOpenWritingPipe((uint8_t *) addresses[DEVICE_IDX]);
     nrfOpenReadingPipe(0, (uint8_t *) addresses[CENTRAL_DEVICE_IDX]);
@@ -302,7 +305,7 @@ void NRFLoadPipes() {
  * @param buffer The buffer to be sent
  * @param bufferSize The size of the buffer
  */
-void NRFSendPacket(char* buffer, uint16_t bufferSize) {
+void transmit_nrf(char* buffer, uint16_t bufferSize) {
     cli();                                                  // Disable interrupts
     nrfStopListening();                                     // Stop listening
     nrfWrite((uint8_t *) buffer, bufferSize);      // Write to the targetted device
@@ -339,8 +342,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         len = nrfGetDynamicPayloadSize();
-        nrfRead((char *) receive_buffer, len );
-        receive_buffer[len] = '\0';
+        nrfRead((char *) rx_buffer, len );
+        rx_buffer[len] = '\0';
         packet_received = true;
     }
 }

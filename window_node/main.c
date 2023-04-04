@@ -30,7 +30,7 @@
 
 // The speed of sending the data from our sensor
 #define TICK_SPEED 10
-#define TWO_P_10 1024     // 2 ^ 10
+#define TIMER_PRESCALER 1024     // 2 ^ 10
 #define DEFAULT_TEMPERATUER_VALUE 20
 
 // The pin indices for the ports we'd like to use
@@ -55,7 +55,7 @@ typedef enum {
     WDW_CMD_OPEN        = 0x1,
     WDW_CMD_CLOSE       = 0x2,
     WDW_HUMID_THRESHOLD = 60,
-    WDW_TEMP_CLOSE      = 15,       // Window closes under this temperature
+    WDW_TEMP_CLOSE      = 18,       // Window closes under this temperature
     WDW_TEMP_OPEN       = 23,       // Window opens above this temperature
     WDW_TEMP_CLOSE_THRESHOLD = 8,   // The outside temperature at which the window forcefully closes, unless manual mode is turned on.
     WDW_TEMP_OPEN_THRESHOLD  = 30,  // The outside temperature at which the window forcefully opens.
@@ -69,27 +69,27 @@ typedef enum {
 } nrf_cfg;
 
 // Buffers for receiving and sending packets.
-volatile char receive_buffer[BUFFER_LENGTH];
+volatile char rx_buffer[BUFFER_LENGTH];
 
 // Flags that can be called by interrupt functions.
 volatile bool packet_received = false;
 volatile bool timer_triggered = false;
 
 // Predefine the functions for later use.
-void Configure();
-void NRFInit();
+void confugure();
+void configure_nrf();
 void NRFLoadPipes();
-void NRFSendPacket(char* buffer, uint16_t bufferSize);
-void ReadADC(ADC_t* adc, uint16_t * dst);
+void transmit_nrg(char* buffer, uint16_t bufferSize);
+void read_adc(ADC_t* adc, uint16_t * dst);
 bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, bool manual_mode);
 bool ShouldClose(int16_t inside_temperature, int16_t outside_temperature, bool manual_mode);
 
 // The main function, clearly
 int main(void) {
 
-    Configure();
+    confugure();
     USARTInit(F_CPU, UARTF0_BAUD);
-    NRFInit();
+    configure_nrf();
 
     char transmit_buffer[BUFFER_LENGTH];
     uint8_t switches;
@@ -117,7 +117,7 @@ int main(void) {
 
             // Calculate the voltage from the ADC res, then use the formula we gathered from the LMT85
             // to calculate the inside_temperature. We can then use this in further calculations and operations.
-            ReadADC(&ADCA, &outside_temperature_res);
+            read_adc(&ADCA, &outside_temperature_res);
             outside_temperature = (int16_t) MVOLT_TO_C(ADC_TO_MVOLT(outside_temperature_res, ADC_REF_V));
 
             // This value is higher than one if the bit is set.
@@ -143,14 +143,6 @@ int main(void) {
                     (window_state & WDW_CMD_OPEN) ?  (switches & PIN_SWITCH_LEFT  ? 0 :  PIN_MOTOR_LEFT)  :
                     (window_state & WDW_CMD_CLOSE) ? (switches & PIN_SWITCH_RIGHT ? 0 :  PIN_MOTOR_RIGHT) : motor_pin_cmd;
 
-            sprintf(transmit_buffer, "%s%s%s%s[%d]",
-                    switches & PIN_SWITCH_LEFT ? "#" : "_",
-                    switches & PIN_SWITCH_RIGHT ? "#" : "_",
-                    manual_mode > 0 ? "#" : "_",
-                    motor_pin_cmd == PIN_MOTOR_LEFT ? "L" :
-                    motor_pin_cmd == PIN_MOTOR_RIGHT ? "R" : "N", outside_temperature);
-            NRFSendPacket(transmit_buffer, strlen(transmit_buffer));
-
             timer_triggered = false;
         }
 
@@ -160,14 +152,14 @@ int main(void) {
         // Checking whether there's a packet
         if (packet_received) {
 
-            if (!strncmp((char *) receive_buffer, "temp=", 5))
-                inside_temperature = atoi((char *) &receive_buffer[5]);
+            if (!strncmp((char *) rx_buffer, "temp=", 5))
+                inside_temperature = atoi((char *) &rx_buffer[5]);
 
-            if (!strncmp((char *) receive_buffer, "humid=", 6))
-                inside_humidity = atoi((char *) &receive_buffer[6]);
+            if (!strncmp((char *) rx_buffer, "humid=", 6))
+                inside_humidity = atoi((char *) &rx_buffer[6]);
 
             // Clear the receive-buffer.
-            memset((char *) receive_buffer, 0, BUFFER_LENGTH);
+            memset((char *) rx_buffer, 0, BUFFER_LENGTH);
             packet_received = false;
         }
     }
@@ -191,7 +183,7 @@ bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_te
  * > 32MHz Clock speed
  * > E1 Timer
  */
-void Configure() {
+void confugure() {
     OSC.XOSCCTRL = OSC_FRQRANGE_12TO16_gc |                   // Select frequency range
                    OSC_XOSCSEL_XTAL_16KCLK_gc;                // Select start-up time
     OSC.CTRL |= OSC_XOSCEN_bm;                                // Enable oscillator
@@ -213,12 +205,12 @@ void Configure() {
     ADCA.CH0.CTRL    = ADC_CH_INPUTMODE_SINGLEENDED_gc;     // Single ended input without gain
     ADCA.REFCTRL     = ADC_REFSEL_INTVCC_gc;                // Reference voltage, INTVCC = 3.3V / 1.6 ~ 2.0V
     ADCA.CTRLB       = ADC_RESOLUTION_12BIT_gc;             // Range of number conversion, 185 - 2^14-1
-    ADCA.PRESCALER   = ADC_PRESCALER_DIV512_gc;             // F_CPU / PRESCALER -> Speed of conversoin
+    ADCA.PRESCALER   = ADC_PRESCALER_DIV512_gc;             // F_CPU / TIMER_PRESCALER -> Speed of conversoin
     ADCA.CTRLA       = ADC_ENABLE_bm;                       // Turn on the ADC converter
 
     TCE1.CTRLB    = TC_WGMODE_NORMAL_gc;
     TCE1.CTRLA    = TC_CLKSEL_DIV1024_gc;            // Clock divisor. For 32MHz and D(1024), it does 31250 loops per second
-    TCE1.PER      = F_CPU / (TWO_P_10 * TICK_SPEED) - 1;         // Setup the speed of the TIMER
+    TCE1.PER      = F_CPU / (TIMER_PRESCALER * TICK_SPEED) - 1;         // Setup the speed of the TIMER
     TCE1.INTCTRLA = TC_OVFINTLVL_LO_gc;              // No interrupts
 
     sei();
@@ -229,7 +221,7 @@ void Configure() {
  *  Individual settings can be changed in the enumerable defined
  *  at the top of this file.
  */
-void NRFInit(void) {
+void configure_nrf(void) {
     // Set up the transmission
     nrfspiInit();
     nrfBegin();
@@ -239,16 +231,16 @@ void NRFInit(void) {
     nrfSetPALevel(NRF_RF_SETUP_PWR_6DBM_gc);
 
     // Data transmission rate, set at 250Kb
-    nrfSetDataRate((nrf_rf_setup_rf_dr_t) NRF_DATA_SPEED);
+    nrfSetDataRate(NRF_RF_SETUP_RF_DR_250K_gc);
 
     // Enable cyclic redundancy check. This checks whether the packet is corrupt or not.
     // If not, parse it, else retry
-    nrfSetCRCLength((nrf_config_crc_t) NRF_CRC);
+    nrfSetCRCLength(NRF_CONFIG_CRC_8_gc);
 
     // Set the channel to what we've previously defined.
     // The band frequency is defined as f = (2400 + CH) MHz
     // For channel 6, this means 2,406 MHz
-    nrfSetChannel(NRF_CHANNEL);
+    nrfSetChannel(6);
 
     // Require acknowledgements
     nrfSetAutoAck(1);
@@ -276,7 +268,7 @@ void NRFInit(void) {
  * @param adc The adc object to use
  * @return The value retrieved by the adc
  */
-void ReadADC(ADC_t* adc, uint16_t * dst) {
+void read_adc(ADC_t* adc, uint16_t * dst) {
     adc->CH0.CTRL |= ADC_CH_START_bm;                    // start ADC conversion
     while ( !(adc->CH0.INTFLAGS & ADC_CH_CHIF_bm) ) ;    // wait until it's ready
     *dst = adc->CH0.RES;
@@ -302,7 +294,7 @@ void NRFLoadPipes() {
  * @param buffer The buffer to be sent
  * @param bufferSize The size of the buffer
  */
-void NRFSendPacket(char* buffer, uint16_t bufferSize) {
+void transmit_nrg(char* buffer, uint16_t bufferSize) {
 
     cli();                                                  // Disable interrupts
     nrfStopListening();                                     // Stop listening
@@ -333,8 +325,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         len = nrfGetDynamicPayloadSize();
-        nrfRead((char *) receive_buffer, len );
-        receive_buffer[len] = '\0';
+        nrfRead((char *) rx_buffer, len );
+        rx_buffer[len] = '\0';
         packet_received = true;
     }
 }
