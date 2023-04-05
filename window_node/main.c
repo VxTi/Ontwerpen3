@@ -54,9 +54,10 @@ typedef enum {
     WDW_CMD_DO_NOTHING  = 0x0,
     WDW_CMD_OPEN        = 0x1,
     WDW_CMD_CLOSE       = 0x2,
-    WDW_HUMID_THRESHOLD = 60,
     WDW_TEMP_CLOSE      = 18,       // Window closes under this temperature
     WDW_TEMP_OPEN       = 23,       // Window opens above this temperature
+    WDW_HUMID_THRESHOLD = 60,
+    WDW_CO2_THRESHOLD_RES = 2000,
     WDW_TEMP_CLOSE_THRESHOLD = 8,   // The outside temperature at which the window forcefully closes, unless manual mode is turned on.
     WDW_TEMP_OPEN_THRESHOLD  = 30,  // The outside temperature at which the window forcefully opens.
 } wdw_flags;
@@ -69,7 +70,7 @@ typedef enum {
 } nrf_cfg;
 
 // Buffers for receiving and sending packets.
-volatile char rx_buffer[BUFFER_LENGTH];
+volatile char receive_buffer[BUFFER_LENGTH];
 
 // Flags that can be called by interrupt functions.
 volatile bool packet_received = false;
@@ -81,7 +82,7 @@ void configure_nrf();
 void NRFLoadPipes();
 void transmit_nrg(char* buffer, uint16_t bufferSize);
 void read_adc(ADC_t* adc, uint16_t * dst);
-bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, bool manual_mode);
+bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, uint16_t co2_res,  bool manual_mode);
 bool ShouldClose(int16_t inside_temperature, int16_t outside_temperature, bool manual_mode);
 
 // The main function, clearly
@@ -99,7 +100,7 @@ int main(void) {
     int8_t  inside_temperature  = DEFAULT_TEMPERATUER_VALUE;
     int16_t outside_temperature = DEFAULT_TEMPERATUER_VALUE;
 
-    uint16_t outside_temperature_res = 0;
+    uint16_t outside_temperature_res = 0, co2_res = 0;
     wdw_flags window_state = 0;
 
 
@@ -132,7 +133,7 @@ int main(void) {
 
                 // Check whether the window should open or close, depending on various variables.
                 window_state =
-                        ShouldOpen(inside_humidity, inside_temperature, outside_temperature, manual_mode) ? WDW_CMD_OPEN :
+                        ShouldOpen(inside_humidity, inside_temperature, outside_temperature, co2_res, manual_mode) ? WDW_CMD_OPEN :
                         ShouldClose(inside_temperature, outside_temperature, manual_mode) ? WDW_CMD_CLOSE :
                             WDW_CMD_DO_NOTHING;
             }
@@ -152,14 +153,17 @@ int main(void) {
         // Checking whether there's a packet
         if (packet_received) {
 
-            if (!strncmp((char *) rx_buffer, "temp=", 5))
-                inside_temperature = atoi((char *) &rx_buffer[5]);
+            if (!strncmp((char *) receive_buffer, "temp=", 5))
+                inside_temperature = atoi((char *) &receive_buffer[5]);
 
-            if (!strncmp((char *) rx_buffer, "humid=", 6))
-                inside_humidity = atoi((char *) &rx_buffer[6]);
+            if (!strncmp((char *) receive_buffer, "humid=", 6))
+                inside_humidity = atoi((char *) &receive_buffer[6]);
+
+            if (!strncmp((char *) receive_buffer, "co2_res=", 8))
+                co2_res = atoi((char *) &receive_buffer[8]);
 
             // Clear the receive-buffer.
-            memset((char *) rx_buffer, 0, BUFFER_LENGTH);
+            memset((char *) receive_buffer, 0, BUFFER_LENGTH);
             packet_received = false;
         }
     }
@@ -171,8 +175,9 @@ bool ShouldClose(int16_t inside_temperature, int16_t outside_temperature, bool m
            inside_temperature  < WDW_TEMP_CLOSE;
 }
 
-bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, bool manual_mode) {
+bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, uint16_t co2_res, bool manual_mode) {
     return humidity > WDW_HUMID_THRESHOLD ||
+           co2_res > WDW_CO2_THRESHOLD_RES ||
            manual_mode ?
            (inside_temperature > WDW_TEMP_OPEN_THRESHOLD || outside_temperature > WDW_TEMP_OPEN_THRESHOLD) :
            inside_temperature > WDW_TEMP_OPEN;
@@ -325,8 +330,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         len = nrfGetDynamicPayloadSize();
-        nrfRead((char *) rx_buffer, len );
-        rx_buffer[len] = '\0';
+        nrfRead((char *) receive_buffer, len );
+        receive_buffer[len] = '\0';
         packet_received = true;
     }
 }

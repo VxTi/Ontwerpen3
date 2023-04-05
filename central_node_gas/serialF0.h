@@ -25,8 +25,8 @@
 #include <stdio.h>
 #include <avr/io.h>
 
-#define TXBUF_DEPTH_F0    512      //!<  size of transmit buffer
-#define RXBUF_DEPTH_F0    512      //!<  size of receive buffer
+#define TXBUF_DEPTH_F0    100      //!<  size of transmit buffer
+#define RXBUF_DEPTH_F0    100      //!<  size of receive buffer
 
 #define UART_NO_DATA      0x0100                      //!< Macro UART_NO_DATA is returned by uart_getc when no data is present
 #define clear_screen()    printf("\e[H\e[2J\e[3J");   //!< Macro to reset and clear the terminal

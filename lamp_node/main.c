@@ -41,7 +41,7 @@
 #define LED_PIN_GREEN  PIN1_bm
 #define LED_PIN_BLUE   PIN2_bm
 #define LED_PER        100
-#define MAX_BRIGHTNESS (1.0f / 16.0f) // 0.00001 = 1 / (1 << 5)
+#define MAX_BRIGHTNESS (1.0f / 4.0f) // 0.00001 = 1 / (1 << 5)
 #define LAMP_SLEEP_TIME 5
 
 // Macros for useful math functions. absf returns the floating point absolute value.
@@ -56,7 +56,7 @@ const char * addresses[] = {"1_dev", "2_dev", "3_dev",
                             "4_dev", "5_dev", "6_dev"};
 
 // Buffers for receiving and sending packets.
-volatile uint8_t rx_buffer[BUFFER_LENGTH];
+volatile uint8_t receive_buffer[BUFFER_LENGTH];
 volatile uint8_t transmit_buffer[BUFFER_LENGTH];
 volatile bool    timer_triggered = false;
 volatile bool    packet_received = false;
@@ -78,7 +78,7 @@ inline void v_translate(vec4 * vector, float x, float y, float z, float w) {
 enum {
     TEMPERATURE_MIN = 18,
     TEMPERATURE_MAX = 30,
-    HUMIDITY_MIN = 60,
+    HUMIDITY_MIN = 40,
     HUMIDITY_MAX = 100,
     CO2_MAX_RES = 1600
 } THRESHOLDS;
@@ -111,7 +111,6 @@ int main(void) {
     int8_t temperature = 0;
     uint16_t co2_res = 0;
 
-    uint8_t danger_level = 0;
 
     while (true) {
 
@@ -134,9 +133,9 @@ int main(void) {
         if (timer_triggered) {
             color_lerp.w = lamp_enabled ? MAX_BRIGHTNESS : 0.0f;
 
-            color_lerp.x = clampf((float)(temperature - TEMPERATURE_MIN) / (TEMPERATURE_MAX - TEMPERATURE_MIN), 0.1f, 1); // RED
-            color_lerp.y = clampf((float)(CO2_MAX_RES) / (float)(co2_res - CO2_MAX_RES), 0, 1);
-            color_lerp.z = clampf((float)(humidity - HUMIDITY_MIN) / (HUMIDITY_MAX - HUMIDITY_MIN), 0.1f, 1);
+            color_lerp.x = clampf((float)(temperature - TEMPERATURE_MIN) / (float)(TEMPERATURE_MAX - TEMPERATURE_MIN), 0.3f, 1); // RED
+            color_lerp.y = clampf((float)(co2_res) / (float)(CO2_MAX_RES), 0.3f, 1);
+            color_lerp.z = clampf((float)(humidity - HUMIDITY_MIN) / (float)(HUMIDITY_MAX - HUMIDITY_MIN), 0.3f, 1);
 
             // Linear interpolation
             v_translate(&color,
@@ -152,18 +151,18 @@ int main(void) {
 
         if (packet_received) {
 
-            printf("%s\n", rx_buffer);
+            printf("%s\n", receive_buffer);
 
-            if (!strncmp((char *) rx_buffer, "co2_res=", 8)) {
-                co2_res = atoi((char *) &rx_buffer[8]);
-            } else if (!strncmp((char *) rx_buffer, "temp=", 5)) {
-                temperature = atoi((char *) &rx_buffer[5]);
-            } else if (!strncmp((char *) rx_buffer, "humid=", 6)) {
-                humidity = atoi((char *) &rx_buffer[6]);
+            if (!strncmp((char *) receive_buffer, "co2_res=", 8)) {
+                co2_res = atoi((char *) &receive_buffer[8]);
+            } else if (!strncmp((char *) receive_buffer, "temp=", 5)) {
+                temperature = atoi((char *) &receive_buffer[5]);
+            } else if (!strncmp((char *) receive_buffer, "humid=", 6)) {
+                humidity = atoi((char *) &receive_buffer[6]);
             }
-
+           // printf("T: %dC, H: %d%%, CO2: %);
             // Clear the receive-buffer.
-            memset((char *) rx_buffer, 0, BUFFER_LENGTH);
+            memset((char *) receive_buffer, 0, BUFFER_LENGTH);
             packet_received = false;
         }
     }
@@ -342,8 +341,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         len = nrfGetDynamicPayloadSize();
-        nrfRead((char *) rx_buffer, len );
-        rx_buffer[len] = '\0';
+        nrfRead((char *) receive_buffer, len );
+        receive_buffer[len] = '\0';
         packet_received = true;
     }
 }

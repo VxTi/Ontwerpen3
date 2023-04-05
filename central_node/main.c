@@ -53,7 +53,7 @@ inline void calculate_humidity(uint16_t adcRes, uint16_t temperature, uint8_t * 
 const char *addresses[] = {"1_dev", "2_dev", "3_dev",
                            "4_dev", "5_dev", "6_dev"};
 
-volatile uint8_t rx_buffer[BUFFER_SIZE];
+volatile uint8_t receive_buffer[BUFFER_SIZE];
 volatile bool packet_received = false;
 volatile bool timer_triggered = false;
 
@@ -127,10 +127,10 @@ int main(void) {
         }
 
         if (packet_received) {
-            if (!strncmp((char *) rx_buffer, "co2_res=", 8))
-                str_to_int((char *) &rx_buffer[8], &co2_res);
+            if (!strncmp((char *) receive_buffer, "co2_res=", 8))
+                str_to_int((char *) &receive_buffer[8], &co2_res);
 
-
+            printf("%s\n", receive_buffer);
             packet_received = false;
         }
     }
@@ -179,12 +179,6 @@ void configure() {
     TCE0.CTRLA    = TC_CLKSEL_DIV1024_gc;                   // Clock divisor. For 32MHz and D(1024), it does 31250 loops per second
     TCE0.PER      = F_CPU / (TIMER_PRESCALER * TICK_SPEED) - 1;        // Setup the speed of the TIMER
     TCE0.INTCTRLA = TC_OVFINTLVL_LO_gc;                     // No interrupts
-
-    PORTD.DIRSET = PIN5_bm;
-    TCD1.CTRLA = TC_CLKSEL_DIV64_gc;
-    TCD1.CTRLB = TC0_CCBEN_bm | TC_WGMODE_SINGLESLOPE_gc;
-    TCD1.PER   = LED_PER - 1;
-    TCD1.CCB   = LED_PER / 2;
 
     sei();
 }
@@ -283,7 +277,6 @@ void load_pipes_nrf() {
 * @param bufferSize The size of the buffer
 */
 void transmit_nrf(char * buffer, uint16_t bufferSize) {
-    printf("%s\n", buffer);
     cli();                                   // Disable interrupts
     nrfStopListening();                      // Stop listening
     nrfWrite(buffer, bufferSize);   // Write to the targetted device
@@ -313,8 +306,8 @@ ISR(PORTF_INT0_vect) {
 
     if ( rx_dr ) {
         packet_length = nrfGetDynamicPayloadSize();
-        nrfRead((uint8_t *) rx_buffer, packet_length );
-        rx_buffer[packet_length] = '\0';
+        nrfRead((uint8_t *) receive_buffer, packet_length );
+        receive_buffer[packet_length] = '\0';
         packet_received = true;
     }
 }

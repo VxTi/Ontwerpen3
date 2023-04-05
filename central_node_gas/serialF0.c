@@ -305,7 +305,8 @@ ISR(USARTF0_RXC_vect) {
 
 
 /*  \brief  ISR for transmitting bytes to UARTF0.
- *          If there is a received_packet_byte to send in the TX buffer, it will be send
+ *
+ * If there is a received_packet_byte to send in the TX buffer, it will be send
  */
 ISR(USARTF0_DRE_vect) {
 	
