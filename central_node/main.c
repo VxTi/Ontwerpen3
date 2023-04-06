@@ -24,7 +24,7 @@
 #define HUMID_GROWTH_FACTOR       (-22.953F)  // ΔH / ΔLOG -> ΔT = 1, ΔLOG ≈ -0.04356696835
 #define HUMID_OFFSET_VALUE     (168.010926F)  // Calculated from sheet. Hoff = Δ - L. * ΔH / ΔLOG
 
-#define TICK_SPEED          1 // Frequency at which the timer interrupt is called.
+#define TICK_SPEED          5 // Frequency at which the timer interrupt is called.
 
 #define ADC_REF_V       1.6f  // Input voltage divisor
 #define ADC_MIN          200  // Minimal ADC value with 12 bit res
@@ -60,8 +60,7 @@ static void calculate_humidity(uint16_t adcRes, uint16_t temperature, uint8_t * 
                         log10f(R_humid * powf(HUMID_R_TEMP_GROWTH_FACTOR, temperature)) * HUMID_GROWTH_FACTOR);
 }
 
-const char *addresses[] = {"1_dev", "2_dev", "3_dev",
-                           "4_dev", "5_dev", "6_dev"};
+const char *addresses[] = {"stm_0", "stm_1", "stm_2", "stm_3", "stm_4", "stm_5"};
 
 volatile uint8_t receive_buffer[BUFFER_SIZE];
 volatile bool packet_received = false;
@@ -77,7 +76,7 @@ void configure     ();
 int main(void) {
 
     configure();
-    USARTInit(F_CPU, UARTF0_BAUD);
+    configure_usartf0(F_CPU, UARTF0_BAUD);
     configure_nrf();
 
     char transmit_buffer[BUFFER_SIZE];
@@ -88,28 +87,45 @@ int main(void) {
 
     bool phase = false;
 
+    /*transmit_nrf("co2_res=1200", 12);
+    _delay_ms(25);
+    transmit_nrf("temp=40", 7);
+    _delay_ms(25);
+    transmit_nrf("humid=100", 9);
+    _delay_ms(25);
+    transmit_nrf("PM25=40", 7);
+    _delay_ms(25);
+    for (;;);*/
+
     while (true) {
+
         if (timer_triggered) {
-
-            phase = !phase;
-
             read_adc(&ADCA, &temperature_res);                       // Read ADC value from temperature sensor
             read_adc(&ADCB, &humidity_res);                          // Read ADC value from humidity sensor
             calculate_temperature(temperature_res, &temperature);
             calculate_humidity(humidity_res, temperature, &humidity);
 
-            sprintf((char *) transmit_buffer, "%s=%d",
-                    phase ? "temp" : "humid",
-                    phase ?  temperature : humidity);
+            // Clear, fill, transmit :)
+            memset(transmit_buffer, 0, BUFFER_SIZE);
+            sprintf((char *) transmit_buffer, "%s=%d", phase ? "temp" : "humid", phase ?  temperature : humidity);
             transmit_nrf((char *) transmit_buffer, strlen((char *) transmit_buffer));
 
+            phase = !phase;
             timer_triggered = false;
         }
 
         if (packet_received) {
 
-            // Forward the RX buffer to the other nodes.
-            transmit_nrf((char *) receive_buffer, strlen((char *) receive_buffer));
+            if (!strncmp((char *) receive_buffer, "PM10", 4) || !strncmp((char *) receive_buffer, "PM25", 4) || !strncmp((char *) receive_buffer, "co2_res", 7)) {
+
+                // Copy RX to TX buffer and send
+                memset(transmit_buffer, 0, BUFFER_SIZE);
+                sprintf(transmit_buffer, "%s", receive_buffer);
+                transmit_nrf((char *) transmit_buffer, strlen(((char *) transmit_buffer)));
+            }
+            printf("R: %s  \n", receive_buffer);
+
+            memset((char *) receive_buffer, 0, BUFFER_SIZE);
             packet_received = false;
         }
     }
@@ -199,7 +215,7 @@ void configure_nrf() {
     nrfSetChannel(6);
 
     // Require acknowledgements
-    nrfSetAutoAck(1);
+    nrfSetAutoAck(false);
     nrfEnableDynamicPayloads();
     nrfClearInterruptBits();
 
@@ -241,7 +257,7 @@ void load_pipes_nrf() {
 * @param bufferSize The size of the buffer
 */
 void transmit_nrf(char * buffer, uint16_t bufferSize) {
-    printf("FW: %s\n", buffer);
+    printf("S: %s  \n", buffer);
     cli();                                   // Disable interrupts
     nrfStopListening();                      // Stop listening
     nrfWrite((uint8_t *) buffer, bufferSize);   // Write to the targetted device

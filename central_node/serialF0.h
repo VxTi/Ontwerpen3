@@ -31,7 +31,7 @@
 #define UART_NO_DATA      0x0100                      //!< Macro UART_NO_DATA is returned by uart_getc when no data is present
 #define clear_screen()    printf("\e[H\e[2J\e[3J");   //!< Macro to reset and clear the terminal
 
-void      USARTInit(uint32_t f_cpu, uint32_t baud);
+void      configure_usartf0(uint32_t f_cpu, uint32_t baud);
 uint16_t  ReadByte(void);
 void      WriteByte(uint8_t data);
 uint8_t   CanRead_F0(void);

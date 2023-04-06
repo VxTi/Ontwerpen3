@@ -16,10 +16,10 @@
 #include "serialF0.h"
 #include <stdbool.h>
 
-#define DEVICE_IDX           4      // The index of the device. Used to retrieve our NRF address.
+#define DEVICE_IDX           1      // The index of the device. Used to retrieve our NRF address.
 #define CENTRAL_DEVICE_IDX   0      // The index of the central device. This is always 0
 
-#define TICK_SPEED           3      // The frequency at which the timer interrupt functions, for timed methods.
+#define TICK_SPEED           5      // The frequency at which the timer interrupt functions, for timed methods.
 #define TIMER_PRESCALER   1024      // Clock prescaler for the timer interrupt, PER = F_CPU / (PRESCALER * Hz) - 1
 
 #define BUFFER_LENGTH       32      // The maximum size of the char buffers
@@ -44,8 +44,8 @@
 #define clampf(x, a, b) ((x) < (a) ? (a) : (x) > (b) ? (b) : (x)) // Macro for clamping a number between bounds.
 
 // The addresses of all the nodes.
-const char * addresses[] = {"1_dev", "2_dev", "3_dev",
-                            "4_dev", "5_dev", "6_dev"};
+const char *addresses[] = {"stm_0", "stm_1", "stm_2", "stm_3", "stm_4", "stm_5"};
+
 
 // Buffers for receiving and sending packets.
 volatile uint8_t receive_buffer [BUFFER_LENGTH];
@@ -67,7 +67,7 @@ void configure_sds011();
 int main(void) {
 
     confugure();
-    USARTInit(F_CPU, UARTF0_BAUD);
+    configure_usartf0(F_CPU, UARTF0_BAUD);
     configure_sds011();
     configure_nrf();
 
@@ -214,7 +214,7 @@ void configure_nrf(void) {
     nrfSetChannel(6);
 
     // Require acknowledgements
-    nrfSetAutoAck(1);
+    nrfSetAutoAck(false);
     nrfEnableDynamicPayloads();
     nrfClearInterruptBits();
 

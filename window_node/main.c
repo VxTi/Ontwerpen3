@@ -16,22 +16,21 @@
 #include "serialF0.h"
 #include <stdbool.h>
 
-#define BUFFER_LENGTH 32
-#define ADC_MAX 4095
-#define ADC_MIN 200
-
-#define ADC_REF_V 1.6F
+#define BUFFER_LENGTH 32  // Max char buffer size
+#define ADC_MAX     4095  // Max ADC value for 12 bit
+#define ADC_MIN      200  // Minimal ADC value for 12 bit resolution
+#define ADC_REF_V   1.6F  // Voltage in divisor
+#define ADC_VIN     3200  // Input voltage in mV
 
 // This is the index of the current device. The device address is hereby selected as addresses[DEVICE_IDX]
-#define DEVICE_IDX 2
+#define DEVICE_IDX 3
 
 // The index of the central device. This is always 0
 #define CENTRAL_DEVICE_IDX 0
 
-// The speed of sending the data from our sensor
-#define TICK_SPEED 10
-#define TIMER_PRESCALER 1024     // 2 ^ 10
-#define DEFAULT_TEMPERATUER_VALUE 20
+#define TICK_SPEED                10  // The speed of sending the data from our sensor
+#define TIMER_PRESCALER         1024  // Timer prescaler. PER = F_CPU / (PRESCALER * Hz) - 1
+#define DEFAULT_VALUE             20  // Default value for both temperature and humidity, so the window doesn't open or close randomly
 
 // The pin indices for the ports we'd like to use
 #define PIN_MOTOR_LEFT   PIN5_bm
@@ -41,12 +40,11 @@
 #define PIN_MANUAL_CTRL  PIN2_bm
 
 // Macros to convert ADC res to temperature (This is for the LMT85)
-#define ADC_TO_MVOLT(res, ref) ((3200 / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN))
+#define ADC_TO_MVOLT(res, ref) ((ADC_VIN / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN))
 #define MVOLT_TO_C(v)           ((8.194f - sqrtf(67.141636f + 4 * 0.00262f * (1324.0f - (v)))) / (2 * -0.00262f) + 30.0f)
 
 // The addresses of all the nodes.
-const char * addresses[] = {"1_dev", "2_dev", "3_dev",
-                           "4_dev", "5_dev", "6_dev"};
+const char *addresses[] = {"stm_0", "stm_1", "stm_2", "stm_3", "stm_4", "stm_5"};
 
 // Window command flags and values.
 // Triggering command flags is used the same way as the process flag as stated above.
@@ -56,59 +54,49 @@ typedef enum {
     WDW_CMD_CLOSE       = 0x2,
     WDW_TEMP_CLOSE      = 18,       // Window closes under this temperature
     WDW_TEMP_OPEN       = 23,       // Window opens above this temperature
-    WDW_HUMID_THRESHOLD = 60,
-    WDW_CO2_THRESHOLD_RES = 2000,
+    WDW_HUMID_THRESHOLD = 60,       // Maximal humidity threshold in percentage
+    PM10_MAX        = 20,       // Max yearly average PM10  value in ug/m3
+    PM25_MAX        = 10,       // Max yearly average PM2.5 value in ug/m3
+    CO2_RES_MAX = 2000,   // Since the sensor doesn't measure in PPM, we have to use a resolution value as max
     WDW_TEMP_CLOSE_THRESHOLD = 8,   // The outside temperature at which the window forcefully closes, unless manual mode is turned on.
     WDW_TEMP_OPEN_THRESHOLD  = 30,  // The outside temperature at which the window forcefully opens.
 } wdw_flags;
 
-// NRF Configuration. Can change later on.
-typedef enum {
-    NRF_CHANNEL    = 6,                         // Frequency channel (2400 + CH)MHz
-    NRF_DATA_SPEED = NRF_RF_SETUP_RF_DR_250K_gc,// Data transfer speed
-    NRF_CRC        = NRF_CONFIG_CRC_8_gc,       // Cyclic redundancy check length
-} nrf_cfg;
+volatile char receive_buffer[BUFFER_LENGTH];  // Buffer for receiving packets
+volatile bool packet_received = false;        // Flag for when a packet is received
+volatile bool timer_triggered = false;        // Flag for when the timer is triggered.
 
-// Buffers for receiving and sending packets.
-volatile char receive_buffer[BUFFER_LENGTH];
-
-// Flags that can be called by interrupt functions.
-volatile bool packet_received = false;
-volatile bool timer_triggered = false;
-
-// Predefine the functions for later use.
 void confugure();
 void configure_nrf();
 void NRFLoadPipes();
-void transmit_nrg(char* buffer, uint16_t bufferSize);
+void transmit_nrf(char* buffer, uint16_t bufferSize);
 void read_adc(ADC_t* adc, uint16_t * dst);
-bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, uint16_t co2_res,  bool manual_mode);
+bool ShouldOpen(uint8_t humid, int16_t in_temp, int16_t out_temp, uint16_t co2_res, uint16_t pm10, uint16_t pm25, bool manual);
 bool ShouldClose(int16_t inside_temperature, int16_t outside_temperature, bool manual_mode);
 
 // The main function, clearly
 int main(void) {
 
     confugure();
-    USARTInit(F_CPU, UARTF0_BAUD);
+    configure_usartf0(F_CPU, UARTF0_BAUD);
     configure_nrf();
 
-    char transmit_buffer[BUFFER_LENGTH];
     uint8_t switches;
     uint8_t manual_mode, motor_pin_cmd = 0;
 
-    uint8_t inside_humidity    = DEFAULT_TEMPERATUER_VALUE;
-    int8_t  inside_temperature  = DEFAULT_TEMPERATUER_VALUE;
-    int16_t outside_temperature = DEFAULT_TEMPERATUER_VALUE;
+    uint8_t inside_humidity     = DEFAULT_VALUE;
+    int8_t  inside_temperature  = DEFAULT_VALUE;
+    int16_t outside_temperature = DEFAULT_VALUE;
 
-    uint16_t outside_temperature_res = 0, co2_res = 0;
+    uint16_t outside_temperature_res = 0, co2_res = 0, PM10 = 0, PM25 = 0;
     wdw_flags window_state = 0;
 
 
     // Set the DIR bits of the switches to LOW to define them as inputs.
     // Set the DIR bits for the motor rotations to HIGH to define them as outputs.
     PORTD.DIRCLR = PIN_SWITCH_LEFT | PIN_SWITCH_RIGHT | PIN_MANUAL_CTRL;
-    PORTD.DIRSET = PIN_MOTOR_LEFT | PIN_MOTOR_RIGHT;
-    PORTD.OUTCLR = PIN_MOTOR_LEFT | PIN_MOTOR_RIGHT;
+    PORTD.DIRSET = PIN_MOTOR_LEFT  | PIN_MOTOR_RIGHT;
+    PORTD.OUTCLR = PIN_MOTOR_LEFT  | PIN_MOTOR_RIGHT;
 
     while (1) {
 
@@ -133,7 +121,7 @@ int main(void) {
 
                 // Check whether the window should open or close, depending on various variables.
                 window_state =
-                        ShouldOpen(inside_humidity, inside_temperature, outside_temperature, co2_res, manual_mode) ? WDW_CMD_OPEN :
+                        ShouldOpen(inside_humidity, inside_temperature, outside_temperature, co2_res, PM10, PM25, manual_mode) ? WDW_CMD_OPEN :
                         ShouldClose(inside_temperature, outside_temperature, manual_mode) ? WDW_CMD_CLOSE :
                             WDW_CMD_DO_NOTHING;
             }
@@ -152,35 +140,47 @@ int main(void) {
 
         // Checking whether there's a packet
         if (packet_received) {
+            if (!strncmp((char *) receive_buffer, "temp=", 5)) {
 
-            if (!strncmp((char *) receive_buffer, "temp=", 5))
                 inside_temperature = atoi((char *) &receive_buffer[5]);
 
-            if (!strncmp((char *) receive_buffer, "humid=", 6))
+            } else if (!strncmp((char *) receive_buffer, "humid=", 6)) {
+
                 inside_humidity = atoi((char *) &receive_buffer[6]);
 
-            if (!strncmp((char *) receive_buffer, "co2_res=", 8))
+            } else if (!strncmp((char *) receive_buffer, "co2_res=", 8)) {
+
                 co2_res = atoi((char *) &receive_buffer[8]);
 
-            // Clear the receive-buffer.
-            memset((char *) receive_buffer, 0, BUFFER_LENGTH);
+            } else if (!strncmp((char *) receive_buffer, "PM10=", 5)) {
+
+                PM10 = atoi((char *) &receive_buffer[5]);
+
+            } else if (!strncmp((char *) receive_buffer, "PM25=", 5)) {
+
+                PM25 = atoi((char *) &receive_buffer[5]);
+
+            }
+
             packet_received = false;
         }
     }
 }
 
 bool ShouldClose(int16_t inside_temperature, int16_t outside_temperature, bool manual_mode) {
-    return manual_mode ? (inside_temperature < WDW_TEMP_CLOSE_THRESHOLD) :
-           outside_temperature < WDW_TEMP_CLOSE_THRESHOLD ||
-           inside_temperature  < WDW_TEMP_CLOSE;
+    return manual_mode ? (inside_temperature <= WDW_TEMP_CLOSE_THRESHOLD) :
+           outside_temperature <= WDW_TEMP_CLOSE_THRESHOLD ||
+           inside_temperature  <= WDW_TEMP_CLOSE;
 }
 
-bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, uint16_t co2_res, bool manual_mode) {
-    return humidity > WDW_HUMID_THRESHOLD ||
-           co2_res > WDW_CO2_THRESHOLD_RES ||
+bool ShouldOpen(uint8_t humidity, int16_t inside_temperature, int16_t outside_temperature, uint16_t co2_res, uint16_t pm10, uint16_t pm25, bool manual_mode) {
+    return humidity >= WDW_HUMID_THRESHOLD ||
+           co2_res >= CO2_RES_MAX ||
+           pm10 >= PM10_MAX ||
+           pm25 >= PM25_MAX ||
            manual_mode ?
-           (inside_temperature > WDW_TEMP_OPEN_THRESHOLD || outside_temperature > WDW_TEMP_OPEN_THRESHOLD) :
-           inside_temperature > WDW_TEMP_OPEN;
+           (inside_temperature >= WDW_TEMP_OPEN_THRESHOLD || outside_temperature >= WDW_TEMP_OPEN_THRESHOLD) :
+           inside_temperature >= WDW_TEMP_OPEN;
 }
 
 /**
@@ -248,7 +248,7 @@ void configure_nrf(void) {
     nrfSetChannel(6);
 
     // Require acknowledgements
-    nrfSetAutoAck(1);
+    nrfSetAutoAck(false);
     nrfEnableDynamicPayloads();
     nrfClearInterruptBits();
 
@@ -259,8 +259,7 @@ void configure_nrf(void) {
     // Interrupt Pin
     PORTF.INT0MASK |= PIN6_bm;
     PORTF.PIN6CTRL  = PORT_ISC_FALLING_gc;
-    PORTF.INTCTRL  |= (PORTF.INTCTRL & ~PORT_INT0LVL_gm) |
-                      PORT_INT0LVL_LO_gc ; // Interrupts On
+    PORTF.INTCTRL  |= (PORTF.INTCTRL & ~PORT_INT0LVL_gm) | PORT_INT0LVL_LO_gc ; // Interrupts On
 
     // Opening pipes
     NRFLoadPipes();
@@ -299,7 +298,7 @@ void NRFLoadPipes() {
  * @param buffer The buffer to be sent
  * @param bufferSize The size of the buffer
  */
-void transmit_nrg(char* buffer, uint16_t bufferSize) {
+void transmit_nrf(char* buffer, uint16_t bufferSize) {
 
     cli();                                                  // Disable interrupts
     nrfStopListening();                                     // Stop listening

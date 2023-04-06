@@ -18,42 +18,36 @@
 
 // This is the index of the current device. The device address is hereby selected as addresses[DEVICE_IDX]
 #define DEVICE_IDX 4
-
-// The index of the central device. This is always 0
 #define CENTRAL_DEVICE_IDX 0
 
-// Speed of which the timer interrupt operates
-#define TICK_SPEED 20
-#define TIMER_PRESCALER 1024
-#define DELTA_T (1.0F / TICK_SPEED)
-#define INTERPOLATION_FACTOR (1.0f / 10.0f)
+#define TICK_SPEED 20                      // Ticks per second
+#define TIMER_PRESCALER 1024               // Clock pre-scaler
+#define DELTA_T (1.0F / TICK_SPEED)        // Time difference per tick
+#define INTERPOLATION_FACTOR (1.0f / 2.0f) // Interpolation factor for changing the PWM PER
 
-// The maximum size of the char buffers
-#define BUFFER_LENGTH 32
+
+#define BUFFER_LENGTH 32 // The maximum size of the char buffers
 
 // ADC Values
-#define ADC_MAX 4095
-#define ADC_MIN 200
-#define ADC_REF_V 1.6f
+#define ADC_MAX     4095
+#define ADC_MIN      200
+#define ADC_REF_V   1.6f
+#define ADC_VIN     3200
 
-#define LED_PIN_MTNSENSOR PIN3_bm
-#define LED_PIN_RED    PIN0_bm
-#define LED_PIN_GREEN  PIN1_bm
-#define LED_PIN_BLUE   PIN2_bm
-#define LED_PER        100
-#define MAX_BRIGHTNESS (1.0f / 4.0f) // 0.00001 = 1 / (1 << 5)
-#define LAMP_SLEEP_TIME 5
+// Pin locations
+#define LED_PINS_RGB            (PIN3_bm | PIN2_bm | PIN4_bm)
+#define LED_PIN_MOTION_SENSOR   PIN1_bm
+#define LED_PIN_LAMPS           (PIN5_bm | PIN6_bm | PIN7_bm)
+#define LED_PER                     311 // Per value, PER = F_CPU / (PRESCALER * Hz) - 1, 331 = 100Hz
+#define MAX_BRIGHTNESS             0.1f // The max brightness. This is a factor ranging from 0 to 1 inclusively
+#define LAMP_SLEEP_TIME               60 // After how many seconds the lamp goes to sleep if there hasn't been any motion
 
-// Macros for useful math functions. absf returns the floating point absolute value.
+#define clampf(x, a, b) ((x) < (a) ? (a) : (x) > (b) ? (b) : (x)) // Macro for clamping a number between boundaries
 
-#define clampf(x, a, b) ((x) < (a) ? (a) : (x) > (b) ? (b) : (x))
-// Macros for converting ADC res to temperature, according to the datasheet of the LMT85
-
-#define ADC_TO_MVOLT(res, ref) ((3200 / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN))
+#define ADC_TO_MVOLT(res, ref) ((ADC_VIN / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN))
 
 // The addresses of all the nodes.
-const char * addresses[] = {"1_dev", "2_dev", "3_dev",
-                            "4_dev", "5_dev", "6_dev"};
+const char *addresses[] = {"stm_0", "stm_1", "stm_2", "stm_3", "stm_4", "stm_5"};
 
 // Buffers for receiving and sending packets.
 volatile uint8_t receive_buffer[BUFFER_LENGTH];
@@ -61,27 +55,42 @@ volatile uint8_t transmit_buffer[BUFFER_LENGTH];
 volatile bool    timer_triggered = false;
 volatile bool    packet_received = false;
 
-volatile bool    second_passed   = false;
-
 // Vector struct. handy.
 typedef struct {
     float x, y, z, w;
 } vec4;
 
-inline void v_translate(vec4 * vector, float x, float y, float z, float w) {
+/**
+ * Method for translating a 4d vector to a specified position
+ * @param vector The destined vector to store the result in.
+ */
+static inline void v_translate(vec4 * vector, float x, float y, float z, float w) {
     vector->x = x;
     vector->y = y;
     vector->z = z;
     vector->w = w;
 }
 
+// Threshold values.
 enum {
-    TEMPERATURE_MIN = 18,
-    TEMPERATURE_MAX = 30,
-    HUMIDITY_MIN = 40,
-    HUMIDITY_MAX = 100,
-    CO2_MAX_RES = 1600
-} THRESHOLDS;
+    TEMPERATURE_MIN       = 18,
+    TEMPERATURE_MAX       = 30,
+    HUMIDITY_MIN          = 40,
+    HUMIDITY_MAX          = 100,
+    PM10_MAX          = 20,       // Max yearly average PM10  value in ug/m3
+    PM25_MAX          = 10,       // Max yearly average PM2.5 value in ug/m3
+    CO2_RES_MAX = 1300,     // Voltage value retrieved from ADC (Sensor gives too arbitrary values for PPM)
+    SENSOR_COUNT = 5,
+    COLOR_COUNT = 4
+};
+
+// Color codes indicating danger levels, xyzw in rgba
+const vec4 colors[] = {
+        {.x = 0.0f, .y = 0.0f, .z = 1.0f, .w = 1.0f}, // Blue   0x0000FF
+        {.x = 1.0f, .y = 1.0f, .z = 0.0f, .w = 1.0f}, // Yellow 0xFFFF00
+        {.x = 1.0f, .y = 0.5f, .z = 0.0f, .w = 1.0f}, // Orange 0xFF8000
+        {.x = 1.0f, .y = 0.0f, .z = 0.0f, .w = 1.0f}  // Red    0xFF0000
+};
 
 // Predefine the functions for later use.
 void configure();
@@ -96,7 +105,7 @@ void set_rgba(float r, float g, float b, float a);
 int main(void) {
 
     configure();
-    USARTInit(F_CPU, UARTF0_BAUD);
+    configure_usartf0(F_CPU, UARTF0_BAUD);
     configure_nrf();
     configure_lights();
 
@@ -104,38 +113,29 @@ int main(void) {
     v_translate(&color, 0, 0, 0, 0);
     v_translate(&color_lerp, 1, 1, 1, 0);
 
-    uint16_t seconds_passed = 0;
+    uint16_t ticks_passed = 0, seconds_passed = 0, PM10 = 0, PM25 = 0;
     bool lamp_enabled = false;
 
     uint8_t humidity = 0;
     int8_t temperature = 0;
     uint16_t co2_res = 0;
 
-
     while (true) {
-
-        if (second_passed) {
-            seconds_passed++;
-
-            if (PORTD.IN & PIN3_bm) {
-                lamp_enabled = true;
-                seconds_passed = 0;
-            }
-
-            if (seconds_passed >= LAMP_SLEEP_TIME) {
-                lamp_enabled = false;
-                seconds_passed = 0;
-            }
-
-            second_passed = false;
-        }
-
         if (timer_triggered) {
-            color_lerp.w = lamp_enabled ? MAX_BRIGHTNESS : 0.0f;
+            ticks_passed = (ticks_passed + 1) % TICK_SPEED;
 
-            color_lerp.x = clampf((float)(temperature - TEMPERATURE_MIN) / (float)(TEMPERATURE_MAX - TEMPERATURE_MIN), 0.3f, 1); // RED
-            color_lerp.y = clampf((float)(co2_res) / (float)(CO2_MAX_RES), 0.3f, 1);
-            color_lerp.z = clampf((float)(humidity - HUMIDITY_MIN) / (float)(HUMIDITY_MAX - HUMIDITY_MIN), 0.3f, 1);
+            // Color interpolates between 0 and 3 (indices of colors)
+            // This follows the formula (H + T) * |Fco2 + Fpm10 + Fpm25| * C
+            color_lerp = colors[
+                    (uint8_t) clampf(
+                            (((float) (humidity - HUMIDITY_MIN) / (float) (HUMIDITY_MAX - HUMIDITY_MIN)) + ((float) (temperature - TEMPERATURE_MIN) / (float)(TEMPERATURE_MAX - TEMPERATURE_MIN)))
+                            * roundf((
+                    ((float) (co2_res - ADC_MIN) / (float) (CO2_RES_MAX - ADC_MIN)) +
+                    ((float) (PM10_MAX) / (float)PM10) +
+                    ((float) (PM25_MAX) / (float) PM25)) * COLOR_COUNT), 0, COLOR_COUNT - 1)];
+
+
+            color_lerp.w = lamp_enabled ? MAX_BRIGHTNESS : 0.0f;
 
             // Linear interpolation
             v_translate(&color,
@@ -144,24 +144,34 @@ int main(void) {
                         color.z + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.z - color.z),
                         color.w + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.w - color.w));
 
+            printf("RGB: [%.2f, %.2f, %.2f] T: %d, H: %d%%, CO2: %d PM10: %d, PM25: %d        \r",
+                   color.x, color.y, color.z, temperature, humidity, co2_res, PM10, PM25);
             set_rgba(color.x, color.y, color.z, color.w);
 
+            // Check whether a second has passed
+            if (!ticks_passed) {
+                seconds_passed = (seconds_passed + 1) % LAMP_SLEEP_TIME;
+                if (PORTD.IN & LED_PIN_MOTION_SENSOR)
+                    lamp_enabled = true;
+                else if (lamp_enabled && seconds_passed == LAMP_SLEEP_TIME - 1)
+                    lamp_enabled = false;
+            }
             timer_triggered = false;
         }
 
         if (packet_received) {
 
-            printf("%s\n", receive_buffer);
-
             if (!strncmp((char *) receive_buffer, "co2_res=", 8)) {
                 co2_res = atoi((char *) &receive_buffer[8]);
             } else if (!strncmp((char *) receive_buffer, "temp=", 5)) {
-                temperature = atoi((char *) &receive_buffer[5]);
+                temperature = (int8_t) atoi((char *) &receive_buffer[5]);
             } else if (!strncmp((char *) receive_buffer, "humid=", 6)) {
                 humidity = atoi((char *) &receive_buffer[6]);
+            } else if (!strncmp((char *) receive_buffer, "PM10=", 5)) {
+                PM10 = atoi((char *) &receive_buffer[5]);
+            } else if (!strncmp((char *) receive_buffer, "PM25=", 5)) {
+                PM25 = atoi((char *) &receive_buffer[5]);
             }
-           // printf("T: %dC, H: %d%%, CO2: %);
-            // Clear the receive-buffer.
             memset((char *) receive_buffer, 0, BUFFER_LENGTH);
             packet_received = false;
         }
@@ -195,11 +205,6 @@ void configure() {
     TCE1.PER      = F_CPU / (TIMER_PRESCALER * TICK_SPEED) - 1;         // Setup the speed of the TIMER
     TCE1.INTCTRLA = TC_OVFINTLVL_LO_gc;             // No interrupts
 
-    TCE0.CTRLB = TC_WGMODE_NORMAL_gc;
-    TCE0.CTRLA = TC_CLKSEL_DIV1024_gc;
-    TCE0.PER   = F_CPU / (TIMER_PRESCALER) - 1;
-    TCE0.INTCTRLA = TC_OVFINTLVL_LO_gc;
-
     sei();
 }
 
@@ -214,10 +219,9 @@ void set_rgb(float r, float g, float b) {
     r = clampf(r, 0, MAX_BRIGHTNESS);
     g = clampf(g, 0, MAX_BRIGHTNESS);
     b = clampf(b, 0, MAX_BRIGHTNESS);
-
-    TCD0.CCA = (uint16_t) (LED_PER * r);
-    TCD0.CCB = (uint16_t) (LED_PER * g);
-    TCD0.CCC = (uint16_t) (LED_PER * b);
+    TCD0.CCD = (uint16_t) (LED_PER * r);
+    TCD0.CCC = (uint16_t) (LED_PER * g);
+    TCD1.CCA = (uint16_t) (LED_PER * b);
 }
 
 /*
@@ -232,12 +236,15 @@ void set_rgba(float r, float g, float b, float a) {
  * Method for setting up the RGB lights using PWM
  */
 void configure_lights() {
-
-    PORTD.DIRSET = LED_PIN_RED | LED_PIN_GREEN | LED_PIN_BLUE;
-    PORTD.DIRCLR = LED_PIN_MTNSENSOR;
-    TCD0.CTRLA = TC_CLKSEL_DIV64_gc;
-    TCD0.CTRLB = TC0_CCAEN_bm | TC0_CCBEN_bm | TC0_CCCEN_bm | TC_WGMODE_SINGLESLOPE_gc;
-    TCD0.PER   = LED_PER - 1;
+    // RGB -> 3, 2, 4 -> CCD, CCC, CCA
+    PORTD.DIRSET = LED_PINS_RGB | LED_PIN_LAMPS;
+    PORTD.DIRCLR = LED_PIN_MOTION_SENSOR;
+    TCD0.CTRLA = TC_CLKSEL_DIV1024_gc;
+    TCD1.CTRLA = TC_CLKSEL_DIV1024_gc;
+    TCD0.CTRLB = TC0_CCCEN_bm | TC0_CCDEN_bm | TC_WGMODE_SINGLESLOPE_gc;
+    TCD1.CTRLB = TC1_CCAEN_bm | TC_WGMODE_SINGLESLOPE_gc;
+    TCD0.PER   = LED_PER;
+    TCD1.PER   = LED_PER;
     set_rgb(0, 0, 0);
 }
 
@@ -277,8 +284,7 @@ void configure_nrf() {
     // Interrupt Pin
     PORTF.INT0MASK |= PIN6_bm;
     PORTF.PIN6CTRL  = PORT_ISC_FALLING_gc;
-    PORTF.INTCTRL  |= (PORTF.INTCTRL & ~PORT_INT0LVL_gm) |
-                      PORT_INT0LVL_LO_gc ; // Interrupts On
+    PORTF.INTCTRL  |= (PORTF.INTCTRL & ~PORT_INT0LVL_gm) | PORT_INT0LVL_LO_gc ;
 
     // Opening pipes
     load_pipes_nrf();
@@ -320,13 +326,6 @@ void transmit_nrf(char* buffer, uint16_t bufferSize) {
  */
 ISR(TCE1_OVF_vect) {
     timer_triggered = true;
-}
-
-/**
- * Interrupt for notifying when a second has passed.
- */
-ISR(TCE0_OVF_vect) {
-    second_passed = true;
 }
 
 /**

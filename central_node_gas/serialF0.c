@@ -166,7 +166,7 @@ static int8_t calc_bscale(uint32_t f_cpu, uint32_t baud, uint8_t clk2x)
  *
  *  \return  void
  */
-void USARTInit(uint32_t f_cpu, uint32_t baud)
+void configure_usartf0(uint32_t f_cpu, uint32_t baud)
 {
   uint16_t bsel;
   int8_t bscale;
