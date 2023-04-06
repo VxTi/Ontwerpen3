@@ -87,16 +87,6 @@ int main(void) {
 
     bool phase = false;
 
-    /*transmit_nrf("co2_res=1200", 12);
-    _delay_ms(25);
-    transmit_nrf("temp=40", 7);
-    _delay_ms(25);
-    transmit_nrf("humid=100", 9);
-    _delay_ms(25);
-    transmit_nrf("PM25=40", 7);
-    _delay_ms(25);
-    for (;;);*/
-
     while (true) {
 
         if (timer_triggered) {
@@ -123,8 +113,6 @@ int main(void) {
                 sprintf(transmit_buffer, "%s", receive_buffer);
                 transmit_nrf((char *) transmit_buffer, strlen(((char *) transmit_buffer)));
             }
-            printf("R: %s  \n", receive_buffer);
-
             memset((char *) receive_buffer, 0, BUFFER_SIZE);
             packet_received = false;
         }
@@ -257,7 +245,6 @@ void load_pipes_nrf() {
 * @param bufferSize The size of the buffer
 */
 void transmit_nrf(char * buffer, uint16_t bufferSize) {
-    printf("S: %s  \n", buffer);
     cli();                                   // Disable interrupts
     nrfStopListening();                      // Stop listening
     nrfWrite((uint8_t *) buffer, bufferSize);   // Write to the targetted device

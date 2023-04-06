@@ -39,7 +39,7 @@
 #define LED_PIN_MOTION_SENSOR   PIN1_bm
 #define LED_PIN_LAMPS           (PIN5_bm | PIN6_bm | PIN7_bm)
 #define LED_PER                     311 // Per value, PER = F_CPU / (PRESCALER * Hz) - 1, 331 = 100Hz
-#define MAX_BRIGHTNESS             0.1f // The max brightness. This is a factor ranging from 0 to 1 inclusively
+#define MAX_BRIGHTNESS             0.06125f // The max brightness. This is a factor ranging from 0 to 1 inclusively
 #define LAMP_SLEEP_TIME               60 // After how many seconds the lamp goes to sleep if there hasn't been any motion
 
 #define clampf(x, a, b) ((x) < (a) ? (a) : (x) > (b) ? (b) : (x)) // Macro for clamping a number between boundaries
@@ -143,9 +143,6 @@ int main(void) {
                         color.y + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.y - color.y),
                         color.z + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.z - color.z),
                         color.w + DELTA_T * INTERPOLATION_FACTOR * (color_lerp.w - color.w));
-
-            printf("RGB: [%.2f, %.2f, %.2f] T: %d, H: %d%%, CO2: %d PM10: %d, PM25: %d        \r",
-                   color.x, color.y, color.z, temperature, humidity, co2_res, PM10, PM25);
             set_rgba(color.x, color.y, color.z, color.w);
 
             // Check whether a second has passed
@@ -155,6 +152,10 @@ int main(void) {
                     lamp_enabled = true;
                 else if (lamp_enabled && seconds_passed == LAMP_SLEEP_TIME - 1)
                     lamp_enabled = false;
+
+                PORTD.OUT &= ~LED_PIN_LAMPS;
+                if (lamp_enabled)
+                    PORTD.OUT |= LED_PIN_LAMPS;
             }
             timer_triggered = false;
         }

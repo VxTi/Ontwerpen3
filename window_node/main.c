@@ -57,8 +57,9 @@ typedef enum {
     WDW_HUMID_THRESHOLD = 60,       // Maximal humidity threshold in percentage
     PM10_MAX        = 20,       // Max yearly average PM10  value in ug/m3
     PM25_MAX        = 10,       // Max yearly average PM2.5 value in ug/m3
-    CO2_RES_MAX = 2000,   // Since the sensor doesn't measure in PPM, we have to use a resolution value as max
-    WDW_TEMP_CLOSE_THRESHOLD = 8,   // The outside temperature at which the window forcefully closes, unless manual mode is turned on.
+    CO2_RES_MAX     = 2000,   // Since the sensor doesn't measure in PPM, we have to use a resolution value as max
+    WDW_TEMP_CLOSE_THRESHOLD_MIN = 8,   // The outside temperature at which the window forcefully closes, unless manual mode is turned on.
+    WDW_TEMP_CLOSE_THRESHOLD_MAX = 40,
     WDW_TEMP_OPEN_THRESHOLD  = 30,  // The outside temperature at which the window forcefully opens.
 } wdw_flags;
 
@@ -90,7 +91,6 @@ int main(void) {
 
     uint16_t outside_temperature_res = 0, co2_res = 0, PM10 = 0, PM25 = 0;
     wdw_flags window_state = 0;
-
 
     // Set the DIR bits of the switches to LOW to define them as inputs.
     // Set the DIR bits for the motor rotations to HIGH to define them as outputs.
@@ -129,7 +129,7 @@ int main(void) {
             // Set the pin command to the window state. If the switches are turned on, prevent the motor
             // from moving any further. If not, we just check in what direction the motor is moving.
             motor_pin_cmd = manual_mode ? 0 :
-                    (window_state & WDW_CMD_OPEN) ?  (switches & PIN_SWITCH_LEFT  ? 0 :  PIN_MOTOR_LEFT)  :
+                    (window_state & WDW_CMD_OPEN)  ? (switches & PIN_SWITCH_LEFT  ? 0 :  PIN_MOTOR_LEFT)  :
                     (window_state & WDW_CMD_CLOSE) ? (switches & PIN_SWITCH_RIGHT ? 0 :  PIN_MOTOR_RIGHT) : motor_pin_cmd;
 
             timer_triggered = false;
@@ -168,8 +168,9 @@ int main(void) {
 }
 
 bool ShouldClose(int16_t inside_temperature, int16_t outside_temperature, bool manual_mode) {
-    return manual_mode ? (inside_temperature <= WDW_TEMP_CLOSE_THRESHOLD) :
-           outside_temperature <= WDW_TEMP_CLOSE_THRESHOLD ||
+    return manual_mode ? (inside_temperature <= WDW_TEMP_CLOSE_THRESHOLD_MIN) :
+           outside_temperature <= WDW_TEMP_CLOSE_THRESHOLD_MIN ||
+           outside_temperature >= WDW_TEMP_CLOSE_THRESHOLD_MAX ||
            inside_temperature  <= WDW_TEMP_CLOSE;
 }
 
