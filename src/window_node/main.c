@@ -131,11 +131,6 @@ int main(void) {
             motor_pin_cmd = manual_mode ? 0 :
                     (window_state & WDW_CMD_OPEN) ? (switches & PIN_SWITCH_OPEN ? 0 : PIN_MOTOR_OPEN) :
                     (window_state & WDW_CMD_CLOSE) ? (switches & PIN_SWITCH_CLOSE ? 0 : PIN_MOTOR_CLOSE) : motor_pin_cmd;
-            printf("[%s][%s][%s][%s] PM25: %d PM10: %d T: %d To: %d, H: %d         \r", switches & PIN_SWITCH_OPEN ? "#" : "_",
-                   switches & PIN_SWITCH_CLOSE ? "#" : "_",
-                   manual_mode ? "#" : "_",
-                   window_state & WDW_CMD_OPEN ? "o" : window_state & WDW_CMD_CLOSE ? "c" : "n",
-                   PM25, PM10, inside_temperature, outside_temperature, inside_humidity);
 
             if (((switches & PIN_SWITCH_OPEN) && (window_state & WDW_CMD_OPEN)) || ((switches & PIN_SWITCH_CLOSE) && (window_state & WDW_CMD_CLOSE)))
                 window_state = WDW_CMD_DO_NOTHING;
