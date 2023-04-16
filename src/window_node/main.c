@@ -11,9 +11,9 @@
 #include <avr/io.h>
 #include <string.h>
 #include <stdlib.h>
-#include "nrf24spiXM2.h"
-#include "nrf24L01.h"
-#include "serialF0.h"
+#include "../../lib/nrf24spiXM2.h"
+#include "../../lib/nrf24L01.h"
+#include "../../lib/serialF0.h"
 #include <stdbool.h>
 
 #define BUFFER_LENGTH 32  // Max char buffer size
@@ -33,10 +33,10 @@
 #define DEFAULT_VALUE             20  // Default value for both temperature and humidity, so the window doesn't open or close randomly
 
 // The pin indices for the ports we'd like to use
-#define PIN_MOTOR_LEFT   PIN5_bm
-#define PIN_MOTOR_RIGHT  PIN4_bm
-#define PIN_SWITCH_LEFT  PIN0_bm
-#define PIN_SWITCH_RIGHT PIN1_bm
+#define PIN_MOTOR_OPEN   PIN4_bm
+#define PIN_MOTOR_CLOSE  PIN5_bm
+#define PIN_SWITCH_OPEN  PIN0_bm
+#define PIN_SWITCH_CLOSE PIN1_bm
 #define PIN_MANUAL_CTRL  PIN2_bm
 
 // Macros to convert ADC res to temperature (This is for the LMT85)
@@ -52,7 +52,7 @@ typedef enum {
     WDW_CMD_DO_NOTHING  = 0x0,
     WDW_CMD_OPEN        = 0x1,
     WDW_CMD_CLOSE       = 0x2,
-    WDW_TEMP_CLOSE      = 18,       // Window closes under this temperature
+    WDW_TEMP_CLOSE      = 19,       // Window closes under this temperature
     WDW_TEMP_OPEN       = 23,       // Window opens above this temperature
     WDW_HUMID_THRESHOLD = 60,       // Maximal humidity threshold in percentage
     PM10_MAX        = 20,       // Max yearly average PM10  value in ug/m3
@@ -94,9 +94,9 @@ int main(void) {
 
     // Set the DIR bits of the switches to LOW to define them as inputs.
     // Set the DIR bits for the motor rotations to HIGH to define them as outputs.
-    PORTD.DIRCLR = PIN_SWITCH_LEFT | PIN_SWITCH_RIGHT | PIN_MANUAL_CTRL;
-    PORTD.DIRSET = PIN_MOTOR_LEFT  | PIN_MOTOR_RIGHT;
-    PORTD.OUTCLR = PIN_MOTOR_LEFT  | PIN_MOTOR_RIGHT;
+    PORTD.DIRCLR = PIN_SWITCH_OPEN | PIN_SWITCH_CLOSE | PIN_MANUAL_CTRL;
+    PORTD.DIRSET = PIN_MOTOR_OPEN | PIN_MOTOR_CLOSE;
+    PORTD.OUTCLR = PIN_MOTOR_OPEN | PIN_MOTOR_CLOSE;
 
     while (1) {
 
@@ -114,7 +114,7 @@ int main(void) {
 
             // Set the bits of the selected pins to high.
             // We can use these values later for calculations.
-            switches = (PORTD.IN & PIN_SWITCH_LEFT) | (PORTD.IN & PIN_SWITCH_RIGHT);
+            switches = (PORTD.IN & PIN_SWITCH_OPEN) | (PORTD.IN & PIN_SWITCH_CLOSE);
 
             // Check if the window isn't doing anything
             if (window_state == WDW_CMD_DO_NOTHING) {
@@ -129,14 +129,22 @@ int main(void) {
             // Set the pin command to the window state. If the switches are turned on, prevent the motor
             // from moving any further. If not, we just check in what direction the motor is moving.
             motor_pin_cmd = manual_mode ? 0 :
-                    (window_state & WDW_CMD_OPEN)  ? (switches & PIN_SWITCH_LEFT  ? 0 :  PIN_MOTOR_LEFT)  :
-                    (window_state & WDW_CMD_CLOSE) ? (switches & PIN_SWITCH_RIGHT ? 0 :  PIN_MOTOR_RIGHT) : motor_pin_cmd;
+                    (window_state & WDW_CMD_OPEN) ? (switches & PIN_SWITCH_OPEN ? 0 : PIN_MOTOR_OPEN) :
+                    (window_state & WDW_CMD_CLOSE) ? (switches & PIN_SWITCH_CLOSE ? 0 : PIN_MOTOR_CLOSE) : motor_pin_cmd;
+            printf("[%s][%s][%s][%s] PM25: %d PM10: %d T: %d To: %d, H: %d         \r", switches & PIN_SWITCH_OPEN ? "#" : "_",
+                   switches & PIN_SWITCH_CLOSE ? "#" : "_",
+                   manual_mode ? "#" : "_",
+                   window_state & WDW_CMD_OPEN ? "o" : window_state & WDW_CMD_CLOSE ? "c" : "n",
+                   PM25, PM10, inside_temperature, outside_temperature, inside_humidity);
+
+            if (((switches & PIN_SWITCH_OPEN) && (window_state & WDW_CMD_OPEN)) || ((switches & PIN_SWITCH_CLOSE) && (window_state & WDW_CMD_CLOSE)))
+                window_state = WDW_CMD_DO_NOTHING;
 
             timer_triggered = false;
         }
 
-        // First we clear the bits of the PIN_MOTOR_LEFT and PIN_MOTOR_RIGHT then we AND the command.
-        PORTD.OUT = (PORTD.OUT & ~(PIN_MOTOR_LEFT | PIN_MOTOR_RIGHT)) | motor_pin_cmd;
+        // First we clear the bits of the PIN_MOTOR_OPEN and PIN_MOTOR_CLOSE then we AND the command.
+        PORTD.OUT = (PORTD.OUT & ~(PIN_MOTOR_OPEN | PIN_MOTOR_CLOSE)) | motor_pin_cmd;
 
         // Checking whether there's a packet
         if (packet_received) {

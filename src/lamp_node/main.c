@@ -11,9 +11,9 @@
 #include <avr/io.h>
 #include <string.h>
 #include <stdlib.h>
-#include "nrf24spiXM2.h"
-#include "nrf24L01.h"
-#include "serialF0.h"
+#include "../../lib/nrf24spiXM2.h"
+#include "../../lib/nrf24L01.h"
+#include "../../lib/serialF0.h"
 #include <stdbool.h>
 
 // This is the index of the current device. The device address is hereby selected as addresses[DEVICE_IDX]

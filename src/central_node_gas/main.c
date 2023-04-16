@@ -10,10 +10,9 @@
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <string.h>
-#include <stdlib.h>
-#include "nrf24spiXM2.h"
-#include "nrf24L01.h"
-#include "serialF0.h"
+#include "../../lib/nrf24spiXM2.h"
+#include "../../lib/nrf24L01.h"
+#include "../../lib/serialF0.h"
 #include <stdbool.h>
 
 #define DEVICE_IDX           1      // The index of the device. Used to retrieve our NRF address.

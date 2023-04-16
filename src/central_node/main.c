@@ -10,9 +10,9 @@
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <string.h>
-#include "nrf24spiXM2.h"
-#include "nrf24L01.h"
-#include "serialF0.h"
+#include "../../lib/nrf24spiXM2.h"
+#include "../../lib/nrf24L01.h"
+#include "../../lib/serialF0.h"
 #include <stdbool.h>
 
 #define CENTRAL_DEVICE_IDX         (0)
@@ -31,6 +31,7 @@
 #define ADC_MAX         4095  // Max ADC value with 12 bit res
 #define ADC_VIN         3200  // Input voltage reference in mV
 #define ADC_TO_MVOLT(res, ref) ((ADC_VIN / (ref) / (ADC_MAX - ADC_MIN)) * ((res) - ADC_MIN)) // Macro for converting ADC to mV
+#define MV_TO_C(mv)            ((8.194f - sqrtf(67.141636f + 4 * 0.00262f * (1324.0f - ADC_TO_MVOLT(temperatureRes, ADC_REF_V)))) / (2 * -0.00262f) + 30.0f)
 
 #define TIMER_PRESCALER 1024  // Clock speed prescaler. PER = F_CPU / (PRESCALER * Hz) - 1
 
@@ -42,8 +43,8 @@
  * @param temperatureRes  The ADC result
  * @param varDst          The variable to store the result in
  */
-static void calculate_temperature(uint16_t temperatureRes, int16_t * varDst) {
-    *varDst = (int16_t) ((8.194f - sqrtf(67.141636f + 4 * 0.00262f * (1324.0f - ADC_TO_MVOLT(temperatureRes, ADC_REF_V)))) / (2 * -0.00262f) + 30.0f);
+inline static void calculate_temperature(uint16_t temperatureRes, int16_t * varDst) {
+    *varDst = (int16_t) MV_TO_C(ADC_TO_MVOLT(temperatureRes, ADC_REF_V));
 }
 
 /**
@@ -54,7 +55,7 @@ static void calculate_temperature(uint16_t temperatureRes, int16_t * varDst) {
  * @param temperature   The temperature, which is measured based on thermal conductivity (also based on humidity)
  * @param varDst        The variable to store the result of the calculation in
  */
-static void calculate_humidity(uint16_t adcRes, uint16_t temperature, uint8_t * varDst) {
+inline static void calculate_humidity(uint16_t adcRes, uint16_t temperature, uint8_t * varDst) {
     float R_humid = HUMID_RESISTANCE * ((float)(ADC_MAX - ADC_MIN) / (float)(adcRes - ADC_MIN) - 1);
     *varDst = (uint8_t) (HUMID_OFFSET_VALUE +
                         log10f(R_humid * powf(HUMID_R_TEMP_GROWTH_FACTOR, temperature)) * HUMID_GROWTH_FACTOR);
